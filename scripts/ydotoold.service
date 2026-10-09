@@ -1,0 +1,10 @@
+[Unit]
+Description=ydotool daemon (virtual keyboard via uinput)
+After=multi-user.target
+
+[Service]
+ExecStart=/usr/bin/ydotoold --socket-path=/tmp/.ydotool_socket --socket-perm=0666
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

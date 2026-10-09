@@ -1,0 +1,5 @@
+# 計画 C: 東京駅のページを開き、目次の「歴史」を選んでその節を読む
+launch firefox --profile $HOME/ffprof about:blank||window:mozilla firefox
+Type ja.wikipedia.org/wiki/%E6%9D%B1%E4%BA%AC%E9%A7%85 into the address bar and press Enter to open the page||heading:東京駅
+Click the link '歴史' (History) in the table of contents to jump to that section||url:#歴史
+read@歴史 the heading '歴史' and the first paragraphs under it||doc:東京駅

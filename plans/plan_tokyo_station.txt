@@ -1,0 +1,6 @@
+# 計画: Firefox で Wikipedia の「東京駅」を調べて、最初の見出しと段落を読む
+# 1 行 1 サブ目標。'目標||達成条件'。launch / read で始まる行はコードが実行する。
+# URL の日本語は %エンコード（ydotool は ASCII しか打てない）: 東京駅 = %E6%9D%B1%E4%BA%AC%E9%A7%85
+launch firefox --profile $HOME/ffprof about:blank||window:mozilla firefox
+Type ja.wikipedia.org/wiki/%E6%9D%B1%E4%BA%AC%E9%A7%85 into the address bar and press Enter to open the page||title:東京駅 - wikipedia
+read the first heading and the first paragraphs of the article||doc:東京駅
