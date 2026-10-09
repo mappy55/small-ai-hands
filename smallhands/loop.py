@@ -776,6 +776,7 @@ def main():
 
         goal_text = goal if len(goals) == 1 else f"(sub-goal {gi+1}/{len(goals)}) {goal}"
         note = "\n(The page is still loading.)" if "busy:" in docs else ""
+        print(f"    tree {t_tree*1000:.0f}ms ({len(items_all)} items, {len(items)} shown) — asking {a.model} ...", flush=True)
         ans, t_llm, r, prompt = ask_ollama(a.model, goal_text, windows, history, choices_text, note)
         if a.dump:
             os.makedirs(a.dump, exist_ok=True)
