@@ -498,24 +498,49 @@ def kb_type(text):
         return "wl-copy+ctrl-v"
     raise RuntimeError("non-ASCII text needs wl-clipboard (sudo apt install wl-clipboard)")
 
+def _focused_in(acc, depth=0):
+    """acc 自身か、その浅い子孫（combo box の中の入力欄など）に FOCUSED が付いているか"""
+    if _has(acc, pyatspi.STATE_FOCUSED):
+        return True
+    if depth >= 2:
+        return False
+    try:
+        return any(_focused_in(acc.getChildAtIndex(i), depth + 1) for i in range(min(acc.childCount, 8)))
+    except Exception:
+        return False
+
+def _focused(acc, tries=4, interval=0.2):
+    """フォーカスが来たかを少し待ちながら確かめる"""
+    for _ in range(tries):
+        if _focused_in(acc):
+            return True
+        time.sleep(interval)
+    return False
+
 def focus_for_keys(it):
-    """キー入力の前にフォーカスを当てる。URL バーは Ctrl+L、それ以外は grabFocus を試す"""
+    """キー入力の前にフォーカスを当て、本当に来たかを確かめる。来なければ例外（違う場所に打つより止まる方がまし）。
+    URL バーは Ctrl+L（忙しい Firefox には届かないことがあるので最大 3 回）、それ以外は grabFocus → activate の順に試す"""
     acc = it["acc"]
     if "address" in it["name"].lower():
-        kb_combo("ctrl", "l"); time.sleep(0.15)
-        return "ctrl+l"
+        for attempt in range(3):
+            kb_combo("ctrl", "l")
+            if _focused(acc):
+                return "ctrl+l" + ("" if attempt == 0 else f"x{attempt+1}")
+            time.sleep(0.5)
+        raise RuntimeError("address bar did not take focus after Ctrl+L x3 — not typing")
     try:
         acc.queryComponent().grabFocus()
-        time.sleep(0.15)
-        if _has(acc, pyatspi.STATE_FOCUSED):
+        if _focused(acc):
             return "grabFocus"
     except Exception:
         pass
     try:
-        do_click(acc); time.sleep(0.15)   # 入力欄にも activate があることがある
-        return "activate"
+        do_click(acc)                      # 入力欄にも activate があることがある
+        if _focused(acc):
+            return "activate"
     except Exception:
-        return "none"
+        pass
+    raise RuntimeError(f"could not focus {it['role']} '{it['name']}' — not typing")
 
 def do_type(it, text, press_enter):
     """AT-SPI で書けたらそれで終わり。書けなければキーボードで打つ"""
