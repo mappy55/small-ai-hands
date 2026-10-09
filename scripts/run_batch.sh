@@ -42,6 +42,10 @@ ARGS=(--dump "$ROOT/logs/prompts")
 [ -n "${MAX_ITEMS:-}" ] && ARGS+=(--max-items "$MAX_ITEMS")
 [ -n "${NOPRUNE:-}" ] && ARGS+=(--no-prune)
 
+# モデルを温める（初回の読み込みは 10〜60 秒かかることがあるので、計測の外でやる）
+echo "== warming up $MODEL ..."
+bash "$ROOT/scripts/check_ollama.sh" "$MODEL" || exit 1
+
 echo "== $MODEL x $RUNS  plan=$PLAN  log=$LOG" | tee -a "$OUT"
 for i in $(seq 1 "$RUNS"); do
   pkill -TERM -x firefox 2>/dev/null; pkill -TERM -f 'firefox-bin' 2>/dev/null

@@ -448,7 +448,7 @@ def ask_ollama(model, goal, windows, history, choices_text, note=""):
     req = urllib.request.Request(f"{OLLAMA}/api/chat", data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     t0 = time.time()
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with urllib.request.urlopen(req, timeout=300) as resp:
         r = json.loads(resp.read())
     wall = time.time() - t0
     ans = json.loads(r["message"]["content"])
@@ -777,7 +777,9 @@ def main():
         goal_text = goal if len(goals) == 1 else f"(sub-goal {gi+1}/{len(goals)}) {goal}"
         note = "\n(The page is still loading.)" if "busy:" in docs else ""
         print(f"    tree {t_tree*1000:.0f}ms ({len(items_all)} items, {len(items)} shown) — asking {a.model} ...", flush=True)
+        signal.alarm(0)                       # 番犬は AT-SPI の詰まり用。LLM の待ち（モデルの初回読み込みで 60s を超えることがある）は urllib の timeout に任せる
         ans, t_llm, r, prompt = ask_ollama(a.model, goal_text, windows, history, choices_text, note)
+        signal.alarm(STEP_TIMEOUT)
         if a.dump:
             os.makedirs(a.dump, exist_ok=True)
             with open(os.path.join(a.dump, f"{time.strftime('%H%M%S')}_step{step}.txt"), "w", encoding="utf-8") as f:
