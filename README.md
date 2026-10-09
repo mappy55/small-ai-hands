@@ -61,10 +61,23 @@ bash scripts/run_batch.sh qwen3:4b-instruct 3 plans/plan_tokyo_history.txt
 - Firefox は専用プロファイル `$HOME/ffprof` で起動します（初回画面・翻訳パネル・セッション復元を `user.js` で切っています）。
 - gedit のような GTK アプリは Collection インターフェースに対応していないので、木を歩く方式に自動で切り替わります。
 
+## 依頼文一つで動かす（計画層を Claude に）
+
+計画ファイルを Claude（Anthropic API）に書かせることもできます。API キーは環境変数で渡します（リポジトリには入れません）。
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+bash scripts/run_request.sh "Firefox で Wikipedia の東京駅を調べて、歴史の節を読んで"
+```
+
+`smallhands/planner.py` が依頼文と条件の語彙、いま見えているウィンドウ名を Claude に渡し、`plans/generated_<日時>.txt` を書きます。そのまま `run_batch.sh` に渡して実行します。モデルは `ANTHROPIC_MODEL`（既定 `claude-sonnet-4-5`）で変えられます。
+
 ## ファイル
 
 ```
 smallhands/loop.py        メインループ（ツリー取得・間引き・選択肢・LLM 呼び出し・実行・条件待ち）
+smallhands/planner.py     計画層: 依頼文 → 計画ファイル（Anthropic API）
+scripts/run_request.sh    依頼文 → 計画 → 実行 を一気に
 plans/                    計画ファイル
 scripts/run_batch.sh      N 回まわして logs/ に記録
 scripts/setup_ydotool.sh  ydotoold の systemd ユニットを入れる（scripts/ydotoold.service）
@@ -73,7 +86,7 @@ scripts/atspi_dump.py     アプリのアクセシビリティツリーを JSON 
 
 ## これから
 
-- 計画層を API 化して、依頼文一つで最後まで通す（条件の語彙を Claude に渡す）
+- 計画層が書いた条件が実物の画面と合わない失敗を集めて、約束の文章を直す
 - 実行層を Claude に差し替えて、小さなモデルと秒数・成否・費用を並べる
 - `loop.py` を a11y / conditions / actions / backends に分ける
 
