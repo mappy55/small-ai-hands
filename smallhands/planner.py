@@ -9,7 +9,7 @@ planner.py — 計画層。依頼文を Claude（Anthropic API）に渡して、
 必要なもの: 環境変数 ANTHROPIC_API_KEY（リポジトリには入れない）。モデルは ANTHROPIC_MODEL か --model で変更可。
 出力の計画ファイルは loop.py にそのまま渡せる（1 行 1 サブ目標、'目標文||達成条件'、launch / read 行はコードが実行）。
 """
-import sys, os, json, time, argparse, urllib.request
+import sys, os, json, time, argparse, urllib.request, urllib.error
 
 API_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5-5")
@@ -58,12 +58,21 @@ def ask_claude(request_text, model, context=""):
     user += "\nWrite the plan file."
     body = {"model": model, "max_tokens": 1024, "temperature": 0,
             "system": SYSTEM, "messages": [{"role": "user", "content": user}]}
-    req = urllib.request.Request(API_URL, data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json", "x-api-key": key,
-                                          "anthropic-version": "2023-06-01"})
+    headers = {"Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01"}
     t0 = time.time()
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        r = json.loads(resp.read())
+    for attempt in range(2):
+        req = urllib.request.Request(API_URL, data=json.dumps(body).encode(), headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                r = json.loads(resp.read())
+            break
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")
+            # 新しいモデルで受け付けないパラメータがあれば外して 1 回だけやり直す
+            if attempt == 0 and e.code == 400 and "temperature" in detail and "temperature" in body:
+                print(f"(API: {detail.strip()[:160]} — retrying without temperature)", file=sys.stderr)
+                body.pop("temperature"); continue
+            sys.exit(f"API error {e.code}: {detail.strip()[:600]}")
     text = "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
     usage = r.get("usage", {})
     return text.strip(), time.time() - t0, usage, user
