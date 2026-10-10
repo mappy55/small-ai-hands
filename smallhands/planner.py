@@ -68,6 +68,18 @@ def ask_claude(request_text, model, context=""):
     usage = r.get("usage", {})
     return text.strip(), time.time() - t0, usage, user
 
+def list_models():
+    """使えるモデル ID を API に聞く（/v1/models）"""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        sys.exit("ANTHROPIC_API_KEY が設定されていません")
+    req = urllib.request.Request("https://api.anthropic.com/v1/models?limit=100",
+                                 headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        d = json.loads(resp.read())
+    for m in d.get("data", []):
+        print(f"{m.get('id'):40s} {m.get('display_name','')}  ({m.get('created_at','')[:10]})")
+
 def desktop_context():
     """いま見えているアプリとウィンドウ名（計画層に渡す。pyatspi が無い環境では空）"""
     try:
@@ -115,12 +127,17 @@ def validate(plan):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("request", help="依頼文（日本語でよい）")
+    ap.add_argument("request", nargs="?", help="依頼文（日本語でよい）")
+    ap.add_argument("--list-models", action="store_true", help="使えるモデル ID を表示して終了")
     ap.add_argument("--out", default="plans/generated.txt")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--no-context", action="store_true", help="いまのウィンドウ一覧を渡さない")
     ap.add_argument("--dry", action="store_true", help="プロンプトを表示するだけ")
     a = ap.parse_args()
+    if a.list_models:
+        list_models(); return
+    if not a.request:
+        ap.error("依頼文を渡してください")
 
     context = "" if a.no_context else desktop_context()
     if a.dry:
