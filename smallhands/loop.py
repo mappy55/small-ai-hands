@@ -490,11 +490,68 @@ def kb_combo(*names):
     codes = [KEY[n] for n in names]
     ydo("key", *[f"{c}:1" for c in codes], *[f"{c}:0" for c in reversed(codes)])
 
+# ---- キーボード配列。ydotool の `type` は US 配列の前提でキーコードを選ぶので、日本語配列の VM では
+#      記号がずれる（'=' が '^'、'@' が '[' など）。記号を含む文字列は配列表を見てキーコードで打つ。
+_LETTERS = {c: 30 + "asdfghjkl".index(c) for c in "asdfghjkl"}
+_LETTERS.update({c: 16 + "qwertyuiop".index(c) for c in "qwertyuiop"})
+_LETTERS.update({c: 44 + "zxcvbnm".index(c) for c in "zxcvbnm"})
+_DIGITS = {str(d): 2 + (d - 1 if d else 9) for d in range(10)}       # 1..9 → 2..10, 0 → 11
+# 記号: 文字 → (keycode, shift)
+_SYM_US = {"-": (12, 0), "_": (12, 1), "=": (13, 0), "+": (13, 1), "[": (26, 0), "{": (26, 1), "]": (27, 0), "}": (27, 1),
+           ";": (39, 0), ":": (39, 1), "'": (40, 0), '"': (40, 1), "`": (41, 0), "~": (41, 1), "\\": (43, 0), "|": (43, 1),
+           ",": (51, 0), "<": (51, 1), ".": (52, 0), ">": (52, 1), "/": (53, 0), "?": (53, 1), " ": (57, 0),
+           "!": (2, 1), "@": (3, 1), "#": (4, 1), "$": (5, 1), "%": (6, 1), "^": (7, 1), "&": (8, 1), "*": (9, 1), "(": (10, 1), ")": (11, 1)}
+_SYM_JP = {"-": (12, 0), "=": (12, 1), "^": (13, 0), "~": (13, 1), "\\": (124, 0), "|": (124, 1), "@": (26, 0), "`": (26, 1),
+           "[": (27, 0), "{": (27, 1), ";": (39, 0), "+": (39, 1), ":": (40, 0), "*": (40, 1), "]": (43, 0), "}": (43, 1),
+           ",": (51, 0), "<": (51, 1), ".": (52, 0), ">": (52, 1), "/": (53, 0), "?": (53, 1), "_": (89, 1), " ": (57, 0),
+           "!": (2, 1), '"': (3, 1), "#": (4, 1), "$": (5, 1), "%": (6, 1), "&": (7, 1), "'": (8, 1), "(": (9, 1), ")": (10, 1)}
+
+def keyboard_layout():
+    """SMALLHANDS_LAYOUT=us|jp があればそれ。無ければ GNOME の設定から推定（取れなければ us）"""
+    env = os.environ.get("SMALLHANDS_LAYOUT")
+    if env:
+        return env.lower()
+    try:
+        out = subprocess.run(["gsettings", "get", "org.gnome.desktop.input-sources", "sources"],
+                             capture_output=True, text=True, timeout=5).stdout
+        if "'jp'" in out:
+            return "jp"
+    except Exception:
+        pass
+    return "us"
+
+LAYOUT = None
+
+def kb_type_keys(text, layout):
+    """1 文字ずつキーコードで打つ（配列表に従う）。打てない文字があれば ValueError"""
+    sym = _SYM_JP if layout == "jp" else _SYM_US
+    seq = []
+    for ch in text:
+        if ch.lower() in _LETTERS:
+            code, shift = _LETTERS[ch.lower()], ch.isupper()
+        elif ch in _DIGITS:
+            code, shift = _DIGITS[ch], 0
+        elif ch in sym:
+            code, shift = sym[ch]
+        else:
+            raise ValueError(f"cannot type {ch!r} with the keyboard")
+        if shift: seq.append("42:1")
+        seq += [f"{code}:1", f"{code}:0"]
+        if shift: seq.append("42:0")
+    for i in range(0, len(seq), 60):          # 引数が長くなりすぎないように分割
+        ydo("key", "--key-delay", "12", *seq[i:i + 60])
+
 def kb_type(text):
-    """ASCII はそのまま打つ。非 ASCII が混ざれば wl-copy + Ctrl+V（wl-clipboard が必要）"""
+    """英数字だけなら ydotool type。記号を含めば配列表でキーコード打ち。非 ASCII は wl-copy + Ctrl+V（wl-clipboard が必要）"""
+    global LAYOUT
+    if LAYOUT is None:
+        LAYOUT = keyboard_layout()
     if text.isascii():
-        ydo("type", "--key-delay", "12", "--file", "/dev/stdin", text_stdin=text)
-        return "ydotool-type"
+        if text.isalnum() or LAYOUT == "us":
+            ydo("type", "--key-delay", "12", "--file", "/dev/stdin", text_stdin=text)
+            return "ydotool-type"
+        kb_type_keys(text, LAYOUT)
+        return f"keycodes-{LAYOUT}"
     if shutil.which("wl-copy"):
         subprocess.run(["wl-copy", "--", text], check=True, timeout=5)
         time.sleep(0.1)
