@@ -47,10 +47,13 @@ echo "== warming up $MODEL ..."
 bash "$ROOT/scripts/check_ollama.sh" "$MODEL" || exit 1
 
 echo "== $MODEL x $RUNS  plan=$PLAN  log=$LOG" | tee -a "$OUT"
+# 計画の launch 行からアプリ名を拾い、run ごとに閉じてから始める（firefox は常に閉じる）
+APP=$(grep -m1 -E '^launch ' "$PLAN" | sed -E 's/^launch +([^ |]+).*/\1/' | xargs -r basename)
 for i in $(seq 1 "$RUNS"); do
-  pkill -TERM -x firefox 2>/dev/null; pkill -TERM -f 'firefox-bin' 2>/dev/null
+  for a in firefox $APP; do pkill -TERM -x "$a" 2>/dev/null; done; pkill -TERM -f 'firefox-bin' 2>/dev/null
   for t in $(seq 1 40); do pgrep -x firefox >/dev/null || pgrep -f firefox-bin >/dev/null || break; sleep 0.25; done
   pgrep -x firefox >/dev/null && { echo "(firefox still alive, killing)"; pkill -KILL -x firefox; sleep 1; }
+  [ -n "${CLEAN_CMD:-}" ] && eval "$CLEAN_CMD"      # 例: CLEAN_CMD='rm -f $HOME/memo.txt'（前の run の成果物を消す）
   sleep "${GAP:-5}"     # a11y レジストリを休ませる
   echo "---- run $i / $RUNS  $(date +%T)" | tee -a "$OUT"
   python3 -u smallhands/loop.py --plan "$PLAN" --model "$MODEL" --log "$LOG" "${ARGS[@]}" 2>&1 | tee -a "$OUT"

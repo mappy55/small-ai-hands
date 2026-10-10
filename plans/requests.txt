@@ -1,0 +1,13 @@
+# 計画層の試験用の依頼文（1 行 1 件、# はコメント）。scripts/run_requests.sh が上から順に「計画 → 実行」する
+# 易: 同じ記事で節だけ違う
+Firefox で Wikipedia の東京駅を開いて、乗り入れ路線の節を読んで
+Firefox で Wikipedia の東京駅を開いて、駅周辺の節を読んで
+# 中: 記事が違う（%エンコードを自分で作る必要がある）
+Firefox で Wikipedia の新宿駅を調べて、最初の段落を読んで
+Firefox で Wikipedia の新宿駅を開いて、歴史の節を読んで
+# 中: 記事内のリンクをたどって別の記事へ（条件を doc: で切り替える必要がある）
+Firefox で Wikipedia の東京駅のページを開いて、本文の「丸ノ内線」のリンクをたどって、その記事の最初の段落を読んで
+# 別アプリ: gedit（launch gedit、text@、title: の語彙）
+gedit を開いて hello from claude と書いて、memo.txt という名前で保存して
+# 難: 日本語の入力が要る（ydotool は ASCII だけ。計画層が URL 直打ちに逃げるか、検索欄に書こうとして失敗するか）
+Firefox で ja.wikipedia.org を開いて、検索欄に 東京駅 と入れて検索して
