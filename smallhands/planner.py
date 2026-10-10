@@ -56,8 +56,10 @@ def ask_claude(request_text, model, context=""):
     if context:
         user += f"\nCurrent state of the desktop (visible apps and windows):\n{context}\n"
     user += "\nWrite the plan file."
-    body = {"model": model, "max_tokens": 1024, "temperature": 0,
+    body = {"model": model, "max_tokens": 1024,
             "system": SYSTEM, "messages": [{"role": "user", "content": user}]}
+    if not model.startswith(("claude-sonnet-5", "claude-opus-5", "claude-haiku-5", "claude-fable")):
+        body["temperature"] = 0          # Claude 5 系は temperature を受け付けない（deprecated）
     headers = {"Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01"}
     t0 = time.time()
     for attempt in range(2):
