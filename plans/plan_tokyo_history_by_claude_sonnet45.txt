@@ -1,0 +1,6 @@
+# request: Firefox で Wikipedia の東京駅を調べて、歴史の節を読んで
+# planner: claude-sonnet-4-5  2026-10-10 22:06  2.8s  in=1215 out=114 tok
+# Firefox で Wikipedia の東京駅を調べて、歴史の節を読んで
+launch firefox --profile $HOME/ffprof about:blank||window:mozilla firefox
+type into combo box 'Search with Google or enter address' and press Enter: ja.wikipedia.org/wiki/%E6%9D%B1%E4%BA%AC%E9%A7%85||heading:東京駅
+read@歴史||doc:東京駅
