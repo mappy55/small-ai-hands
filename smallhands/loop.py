@@ -44,7 +44,7 @@ KEYTYPEABLE = {"combo box"}          # editable な combo box（Firefox の URL 
 # 間引き
 MAX_LINKS = 25
 MAX_ITEMS = 60
-DROP_NAMES = {"minimize", "maximize", "close", "close tab", "firefox view",
+DROP_NAMES = {"minimize", "maximize", "restore down", "close tab", "firefox view",
               "open a new tab (ctrl+t)", "list all tabs", "open application menu", "sidebars",
               "view site information", "enter reader view", "edit this bookmark (ctrl+d)",
               "vpn", "account", "extensions", "import bookmarks…", "try private translations in firefox - beta"}
@@ -295,9 +295,13 @@ def prune(items):
     out, n_links, seen = [], 0, set()
     dropped = 0
     link_names = [it["name"].strip().lower() for it in items if it["role"] == "link" and it["name"].strip()]
+    # ウィンドウ枠の Close（Minimize/Maximize と並ぶもの）は落とすが、ダイアログの Close ボタンは残す
+    chrome_wins = {it["win"] for it in items if it["name"].strip().lower() in ("minimize", "maximize", "restore down")}
     for it in items:
         nm = it["name"].strip()
         if nm.lower() in DROP_NAMES or FOOTNOTE.match(nm):
+            dropped += 1; continue
+        if nm.lower() == "close" and it["win"] in chrome_wins:
             dropped += 1; continue
         if it["role"] in ("list item", "table cell"):
             low = nm.lower()

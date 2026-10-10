@@ -35,6 +35,8 @@ user_pref("browser.newtabpage.enabled", false);
 user_pref("browser.translations.automaticallyPopup", false);
 user_pref("browser.translations.enable", false);
 user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+user_pref("toolkit.startup.max_resumed_crashes", -1);
+user_pref("browser.sessionstore.max_resumed_crashes", -1);
 PREFS
 
 ARGS=(--dump "$ROOT/logs/prompts")
