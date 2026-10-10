@@ -28,7 +28,8 @@ while IFS= read -r line || [ -n "$line" ]; do
     echo "## $n. $req"
     echo
   } >> "$SUMMARY"
-  if ! python3 smallhands/planner.py "$req" --out "$PLAN"; then
+  # 一覧で回すときは毎回まっさらな状態から始めるので、いまの画面は計画層に渡さない（渡すと「もう開いている」前提の計画になる）
+  if ! python3 smallhands/planner.py "$req" --out "$PLAN" --no-context; then
     echo "計画の生成に失敗（形式チェックに落ちたか API エラー）。次の依頼へ"
     echo "計画の生成に失敗" >> "$SUMMARY"
     [ -f "$PLAN" ] && { echo '```text' >> "$SUMMARY"; cat "$PLAN" >> "$SUMMARY"; echo '```' >> "$SUMMARY"; }
