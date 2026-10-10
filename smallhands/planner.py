@@ -12,7 +12,7 @@ planner.py — 計画層。依頼文を Claude（Anthropic API）に渡して、
 import sys, os, json, time, argparse, urllib.request
 
 API_URL = "https://api.anthropic.com/v1/messages"
-DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5-5")
 
 # 計画層に渡す「約束」。実行層（loop.py）の仕様をそのまま文章にしたもの。
 SYSTEM = r"""You write plan files for a small GUI agent that operates Linux desktop apps (GNOME / Wayland) through the AT-SPI2 accessibility tree.

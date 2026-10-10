@@ -70,7 +70,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 bash scripts/run_request.sh "Firefox で Wikipedia の東京駅を調べて、歴史の節を読んで"
 ```
 
-`smallhands/planner.py` が依頼文と条件の語彙、いま見えているウィンドウ名を Claude に渡し、`plans/generated_<日時>.txt` を書きます。そのまま `run_batch.sh` に渡して実行します。モデルは `ANTHROPIC_MODEL`（既定 `claude-sonnet-4-5`）で変えられます。
+`smallhands/planner.py` が依頼文と条件の語彙、いま見えているウィンドウ名を Claude に渡し、`plans/generated_<日時>.txt` を書きます。そのまま `run_batch.sh` に渡して実行します。モデルは `ANTHROPIC_MODEL`（既定 `claude-sonnet-5-5`。`--list-models` で一覧）で変えられます。
 
 ## ファイル
 
