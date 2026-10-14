@@ -22,7 +22,7 @@ loop.py — 小さなローカル LLM にデスクトップアプリを操作さ
 前提: Ollama はホストで OLLAMA_HOST=0.0.0.0（VirtualBox NAT ならゲストから 10.0.2.2:11434、環境変数 OLLAMA_URL で変更可）。
       ydotoold が動いていること（scripts/setup_ydotool.sh）。ydotool は前面のウィンドウに打つので、実行中は他のウィンドウをクリックしない。
 """
-import sys, os, re, json, time, argparse, csv, hashlib, urllib.request, signal, subprocess, shutil
+import sys, os, re, json, time, argparse, csv, hashlib, urllib.request, urllib.error, signal, subprocess, shutil
 
 STEP_TIMEOUT = 60
 def _watchdog(signum, frame):
@@ -440,10 +440,52 @@ SCHEMA = {"type": "object",
 THINK = None
 NUM_CTX = 8192
 
-def ask_ollama(model, goal, windows, history, choices_text, note=""):
-    user = (f"Goal: {goal}\n\nVisible windows: {'; '.join(windows)}{note}\n\n"
+def build_user_prompt(goal, windows, history, choices_text, note=""):
+    return (f"Goal: {goal}\n\nVisible windows: {'; '.join(windows)}{note}\n\n"
             f"History:\n" + ("\n".join(f"- {h}" for h in history) if history else "- (none)") +
             f"\n\nPossible actions:\n{choices_text}\n\nWhich action number?")
+
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+TOKENS = {"in": 0, "out": 0}      # Anthropic バックエンドの累計（費用の見積もり用）
+
+def ask_claude(model, goal, windows, history, choices_text, note=""):
+    """実行層を Claude（Anthropic API）にする。同じ SYSTEM と選択肢を渡し、tool_use で {choice, text} を強制する。
+    戻り値は ask_ollama と同じ形（r には prompt_eval_count / eval_count に相当する値を入れる）"""
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        raise RuntimeError("ANTHROPIC_API_KEY が設定されていません")
+    user = build_user_prompt(goal, windows, history, choices_text, note)
+    body = {"model": model, "max_tokens": 200, "system": SYSTEM,
+            "messages": [{"role": "user", "content": user}],
+            "tools": [{"name": "choose", "description": "Pick exactly one action number (and the text to type, if any).",
+                       "input_schema": SCHEMA}],
+            "tool_choice": {"type": "tool", "name": "choose"}}
+    req = urllib.request.Request(ANTHROPIC_URL, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json", "x-api-key": key,
+                                          "anthropic-version": "2023-06-01"})
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            r = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Anthropic API {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
+    wall = time.time() - t0
+    ans = None
+    for blk in r.get("content", []):
+        if blk.get("type") == "tool_use" and blk.get("name") == "choose":
+            ans = blk.get("input", {}); break
+    if ans is None:                                   # 念のため: テキストで返ってきたら JSON を拾う
+        txt = "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
+        m = re.search(r"\{.*\}", txt, re.S)
+        ans = json.loads(m.group(0)) if m else {"choice": 0, "text": ""}
+    u = r.get("usage", {})
+    TOKENS["in"] += u.get("input_tokens", 0); TOKENS["out"] += u.get("output_tokens", 0)
+    rr = {"prompt_eval_count": u.get("input_tokens"), "eval_count": u.get("output_tokens"),
+          "prompt_eval_duration": 0, "eval_duration": int(wall * 1e9)}
+    return ans, wall, rr, user
+
+def ask_ollama(model, goal, windows, history, choices_text, note=""):
+    user = build_user_prompt(goal, windows, history, choices_text, note)
     body = {"model": model, "stream": False, "format": SCHEMA,
             "options": {"num_ctx": NUM_CTX, "temperature": 0},
             "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]}
@@ -839,7 +881,8 @@ def main():
         note = "\n(The page is still loading.)" if "busy:" in docs else ""
         print(f"    tree {t_tree*1000:.0f}ms ({len(items_all)} items, {len(items)} shown) — asking {a.model} ...", flush=True)
         signal.alarm(0)                       # 番犬は AT-SPI の詰まり用。LLM の待ち（モデルの初回読み込みで 60s を超えることがある）は urllib の timeout に任せる
-        ans, t_llm, r, prompt = ask_ollama(a.model, goal_text, windows, history, choices_text, note)
+        ask = ask_claude if a.model.startswith("claude") else ask_ollama
+        ans, t_llm, r, prompt = ask(a.model, goal_text, windows, history, choices_text, note)
         signal.alarm(STEP_TIMEOUT)
         if a.dump:
             os.makedirs(a.dump, exist_ok=True)
@@ -909,7 +952,8 @@ def main():
         log.writerow(row + [action, f"{t_action:.3f}", f"{t_wait:.3f}", f"{t_total:.3f}", ok])
         logf.flush()
     signal.alarm(0)
-    print(f"== run total {time.time()-t_run0:.1f}s, {step} LLM steps, reached goal {gi}/{len(goals)}")
+    print(f"== run total {time.time()-t_run0:.1f}s, {step} LLM steps, reached goal {gi}/{len(goals)}"
+          + (f", anthropic tokens in={TOKENS['in']} out={TOKENS['out']}" if TOKENS["in"] else ""))
     for _ in range(3):
         try:
             time.sleep(0.3)

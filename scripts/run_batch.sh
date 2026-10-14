@@ -44,9 +44,11 @@ ARGS=(--dump "$ROOT/logs/prompts")
 [ -n "${MAX_ITEMS:-}" ] && ARGS+=(--max-items "$MAX_ITEMS")
 [ -n "${NOPRUNE:-}" ] && ARGS+=(--no-prune)
 
-# モデルを温める（初回の読み込みは 10〜60 秒かかることがあるので、計測の外でやる）
-echo "== warming up $MODEL ..."
-bash "$ROOT/scripts/check_ollama.sh" "$MODEL" || exit 1
+# モデルを温める（初回の読み込みは 10〜60 秒かかることがあるので、計測の外でやる）。claude-* は API なので不要
+case "$MODEL" in
+  claude*) [ -n "${ANTHROPIC_API_KEY:-}" ] || { echo "ANTHROPIC_API_KEY が設定されていません"; exit 1; } ;;
+  *) echo "== warming up $MODEL ..."; bash "$ROOT/scripts/check_ollama.sh" "$MODEL" || exit 1 ;;
+esac
 
 echo "== $MODEL x $RUNS  plan=$PLAN  log=$LOG" | tee -a "$OUT"
 # 計画の launch 行からアプリ名を拾い、run ごとに閉じてから始める（firefox は常に閉じる）

@@ -72,6 +72,17 @@ bash scripts/run_request.sh "Firefox で Wikipedia の東京駅を調べて、�
 
 `smallhands/planner.py` が依頼文と条件の語彙、いま見えているウィンドウ名を Claude に渡し、`plans/generated_<日時>.txt` を書きます。そのまま `run_batch.sh` に渡して実行します。モデルは `ANTHROPIC_MODEL`（既定 `claude-sonnet-5-5`。`--list-models` で一覧）で変えられます。
 
+## 実行層を Claude にする
+
+`--model claude-...` を渡すと、実行層（番号を選ぶ側）も Anthropic API になります。同じ約束・同じ選択肢を渡し、tool_use で `{choice, text}` を返させます。ローカル LLM との比較用です。
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+bash scripts/run_batch.sh claude-sonnet-5-5 3 plans/plan_tokyo_history_by_claude.txt
+```
+
+run の最後に `anthropic tokens in=… out=…` と累計トークンが出ます。
+
 ## ファイル
 
 ```
