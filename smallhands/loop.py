@@ -647,6 +647,9 @@ def focus_for_keys(it):
 
 def do_type(it, text, press_enter):
     """AT-SPI で書けたらそれで終わり。書けなければキーボードで打つ"""
+    # モデルが text に改行やタブを混ぜてくることがある（Haiku 5.5 で観測）。1 行の入力欄に打つ前提なので、
+    # 前後の空白を落とし、途中の改行・タブは空白一つにまとめる（Enter は press_enter で別に扱う）
+    text = " ".join(text.split())
     how, applied = "", False
     if it["kind"] == "type":
         try:
