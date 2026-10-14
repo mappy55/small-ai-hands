@@ -456,7 +456,7 @@ def ask_claude(model, goal, windows, history, choices_text, note=""):
         raise RuntimeError("ANTHROPIC_API_KEY が設定されていません")
     user = build_user_prompt(goal, windows, history, choices_text, note)
     # tool_choice の強制は Claude 5 系で使えない（400）ので、SYSTEM の「JSON だけで答える」に任せて本文から JSON を拾う
-    body = {"model": model, "max_tokens": 200, "system": SYSTEM,
+    body = {"model": model, "max_tokens": 600, "system": SYSTEM,     # 説明文を付けてから JSON を書くことがあるので余裕を持たせる
             "messages": [{"role": "user", "content": user}]}
     req = urllib.request.Request(ANTHROPIC_URL, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json", "x-api-key": key,
@@ -469,7 +469,9 @@ def ask_claude(model, goal, windows, history, choices_text, note=""):
         raise RuntimeError(f"Anthropic API {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
     wall = time.time() - t0
     txt = "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
-    m = re.search(r"\{.*?\}", txt, re.S)
+    m = None
+    for m in re.finditer(r"\{[^{}]*\}", txt):      # 最後に出てきた JSON を採る（前置きの説明に {} が混ざっても拾える）
+        pass
     try:
         ans = json.loads(m.group(0)) if m else {"choice": 0, "text": ""}
     except json.JSONDecodeError:
