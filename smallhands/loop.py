@@ -455,11 +455,9 @@ def ask_claude(model, goal, windows, history, choices_text, note=""):
     if not key:
         raise RuntimeError("ANTHROPIC_API_KEY が設定されていません")
     user = build_user_prompt(goal, windows, history, choices_text, note)
+    # tool_choice の強制は Claude 5 系で使えない（400）ので、SYSTEM の「JSON だけで答える」に任せて本文から JSON を拾う
     body = {"model": model, "max_tokens": 200, "system": SYSTEM,
-            "messages": [{"role": "user", "content": user}],
-            "tools": [{"name": "choose", "description": "Pick exactly one action number (and the text to type, if any).",
-                       "input_schema": SCHEMA}],
-            "tool_choice": {"type": "tool", "name": "choose"}}
+            "messages": [{"role": "user", "content": user}]}
     req = urllib.request.Request(ANTHROPIC_URL, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json", "x-api-key": key,
                                           "anthropic-version": "2023-06-01"})
@@ -470,14 +468,14 @@ def ask_claude(model, goal, windows, history, choices_text, note=""):
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"Anthropic API {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
     wall = time.time() - t0
-    ans = None
-    for blk in r.get("content", []):
-        if blk.get("type") == "tool_use" and blk.get("name") == "choose":
-            ans = blk.get("input", {}); break
-    if ans is None:                                   # 念のため: テキストで返ってきたら JSON を拾う
-        txt = "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
-        m = re.search(r"\{.*\}", txt, re.S)
+    txt = "".join(b.get("text", "") for b in r.get("content", []) if b.get("type") == "text")
+    m = re.search(r"\{.*?\}", txt, re.S)
+    try:
         ans = json.loads(m.group(0)) if m else {"choice": 0, "text": ""}
+    except json.JSONDecodeError:
+        ans = {"choice": 0, "text": ""}
+    if not m:
+        print(f"      (claude replied without JSON: {txt[:120]!r})")
     u = r.get("usage", {})
     TOKENS["in"] += u.get("input_tokens", 0); TOKENS["out"] += u.get("output_tokens", 0)
     rr = {"prompt_eval_count": u.get("input_tokens"), "eval_count": u.get("output_tokens"),
