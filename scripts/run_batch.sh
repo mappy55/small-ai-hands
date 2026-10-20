@@ -44,9 +44,10 @@ ARGS=(--dump "$ROOT/logs/prompts")
 [ -n "${MAX_ITEMS:-}" ] && ARGS+=(--max-items "$MAX_ITEMS")
 [ -n "${NOPRUNE:-}" ] && ARGS+=(--no-prune)
 
-# モデルを温める（初回の読み込みは 10〜60 秒かかることがあるので、計測の外でやる）。claude-* は API なので不要
+# モデルを温める（初回の読み込みは 10〜60 秒かかることがあるので、計測の外でやる）。claude-* / jev-* は API なので不要
 case "$MODEL" in
   claude*) [ -n "${ANTHROPIC_API_KEY:-}" ] || { echo "ANTHROPIC_API_KEY が設定されていません"; exit 1; } ;;
+  jev*)    [ -n "${TYPESAFE_API_KEY:-}" ]  || { echo "TYPESAFE_API_KEY が設定されていません"; exit 1; } ;;
   *) echo "== warming up $MODEL ..."; bash "$ROOT/scripts/check_ollama.sh" "$MODEL" || exit 1 ;;
 esac
 

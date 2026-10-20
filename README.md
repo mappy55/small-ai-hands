@@ -81,7 +81,9 @@ export ANTHROPIC_API_KEY=sk-ant-...
 bash scripts/run_batch.sh claude-sonnet-5-5 3 plans/plan_tokyo_history_by_claude.txt
 ```
 
-run の最後に `anthropic tokens in=… out=…` と累計トークンが出ます。
+run の最後に `api tokens in=… out=…` と累計トークンが出ます。
+
+`--model jev-latest` にすると、実行層が TypeSafe AI の判断専用モデル Jev になります（環境変数 `TYPESAFE_API_KEY`）。Jev は文章を書かないので、選択肢の番号を choice で選ばせ、打つ文字列はサブ目標の文中の引用符から拾います。確信度と上位の確率をログに出します。
 
 ## ファイル
 

@@ -484,6 +484,55 @@ def ask_claude(model, goal, windows, history, choices_text, note=""):
           "prompt_eval_duration": 0, "eval_duration": int(wall * 1e9)}
     return ans, wall, rr, user
 
+TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
+JEV_LAST = {}                      # 直近の確信度など（ログ用）
+
+def goal_text_to_type(goal):
+    """Jev は文字を書けないので、打つ文字列はサブ目標の文から拾う（'...' か "..." で囲まれた最初のもの）"""
+    m = re.search(r"'([^']+)'|\"([^\"]+)\"", goal)
+    return (m.group(1) or m.group(2)) if m else ""
+
+def ask_jev(model, goal, windows, history, choices_text, note=""):
+    """実行層を Jev（TypeSafe AI の判断専用モデル）にする。文章は書かず、選択肢（番号）から一つ選ぶだけ。
+    state に 4B と同じ本文、questions の choice に番号一覧を渡す。戻り値は ask_ollama と同じ形"""
+    key = os.environ.get("TYPESAFE_API_KEY")
+    if not key:
+        raise RuntimeError("TYPESAFE_API_KEY が設定されていません")
+    user = build_user_prompt(goal, windows, history, choices_text, note)
+    lines = choices_text.splitlines()
+    criteria = {str(i + 1): ln.split(". ", 1)[1] if ". " in ln else ln for i, ln in enumerate(lines)}
+    body = {"model": model, "state": SYSTEM + "\n\n" + user,
+            "questions": {"action": {"type": "choice",
+                                     "instructions": "Which numbered action should be taken next to achieve the goal? "
+                                                     "Never repeat an action that already succeeded. "
+                                                     "Choose WAIT only if the page is still loading. Choose DONE only if the goal is already achieved.",
+                                     "criteria": criteria}}}
+    req = urllib.request.Request(TYPESAFE_URL, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            r = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"TypeSafe API {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
+    wall = time.time() - t0
+    a = r.get("answers", {}).get("action", {})
+    try:
+        idx = int(a.get("choice", 0))
+    except (TypeError, ValueError):
+        idx = 0
+    conf = a.get("confidence")
+    probs = a.get("probabilities") or {}
+    top = sorted(probs.items(), key=lambda kv: -kv[1])[:3] if isinstance(probs, dict) else []
+    JEV_LAST.update({"confidence": conf, "top": top})
+    print(f"      (jev confidence {conf!r}, top {[(k, round(v, 2)) for k, v in top]})")
+    text = goal_text_to_type(goal)
+    u = r.get("usage", {})
+    TOKENS["in"] += u.get("input_tokens", 0); TOKENS["out"] += u.get("output_tokens", 0)
+    rr = {"prompt_eval_count": u.get("input_tokens"), "eval_count": u.get("output_tokens"),
+          "prompt_eval_duration": 0, "eval_duration": int(wall * 1e9)}
+    return {"choice": idx, "text": text}, wall, rr, user + f"\n\n(jev criteria: {len(criteria)} options)"
+
 def ask_ollama(model, goal, windows, history, choices_text, note=""):
     user = build_user_prompt(goal, windows, history, choices_text, note)
     body = {"model": model, "stream": False, "format": SCHEMA,
@@ -884,7 +933,7 @@ def main():
         note = "\n(The page is still loading.)" if "busy:" in docs else ""
         print(f"    tree {t_tree*1000:.0f}ms ({len(items_all)} items, {len(items)} shown) — asking {a.model} ...", flush=True)
         signal.alarm(0)                       # 番犬は AT-SPI の詰まり用。LLM の待ち（モデルの初回読み込みで 60s を超えることがある）は urllib の timeout に任せる
-        ask = ask_claude if a.model.startswith("claude") else ask_ollama
+        ask = ask_claude if a.model.startswith("claude") else ask_jev if a.model.startswith("jev") else ask_ollama
         ans, t_llm, r, prompt = ask(a.model, goal_text, windows, history, choices_text, note)
         signal.alarm(STEP_TIMEOUT)
         if a.dump:
@@ -956,7 +1005,7 @@ def main():
         logf.flush()
     signal.alarm(0)
     print(f"== run total {time.time()-t_run0:.1f}s, {step} LLM steps, reached goal {gi}/{len(goals)}"
-          + (f", anthropic tokens in={TOKENS['in']} out={TOKENS['out']}" if TOKENS["in"] else ""))
+          + (f", api tokens in={TOKENS['in']} out={TOKENS['out']}" if TOKENS["in"] else ""))
     for _ in range(3):
         try:
             time.sleep(0.3)
