@@ -83,7 +83,7 @@ bash scripts/run_batch.sh claude-sonnet-5-5 3 plans/plan_tokyo_history_by_claude
 
 run の最後に `api tokens in=… out=…` と累計トークンが出ます。
 
-`--model jev-latest` にすると、実行層が TypeSafe AI の判断専用モデル Jev になります（環境変数 `TYPESAFE_API_KEY`）。Jev は文章を書かないので、選択肢の番号を choice で選ばせ、打つ文字列はサブ目標の文中の引用符から拾います。確信度と上位の確率をログに出します。
+`--model jev-latest` にすると、実行層が TypeSafe AI の判断専用モデル Jev になります（環境変数 `TYPESAFE_API_KEY`）。Jev は文章を書かないので、選択肢の番号を choice で選ばせ、打つ文字列はサブ目標の文中の引用符から拾います。確信度と上位の確率をログに出します。`--wait-conf 0.8`（または環境変数 `SMALLHANDS_WAIT_CONF=0.8`）を付けると、Jev が確信度 0.8 未満で WAIT を選んだときに 12 秒のタイムアウトを待たず、2 秒（`--wait-short`）で聞き直します。
 
 ## ファイル
 

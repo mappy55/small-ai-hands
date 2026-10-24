@@ -8,6 +8,7 @@ MODEL=${1:-qwen3:4b-instruct}
 RUNS=${2:-3}
 PLAN=${3:-plans/plan_tokyo_station.txt}
 TAG=$(echo "$MODEL" | tr ':/' '__')
+[ -n "${SMALLHANDS_WAIT_CONF:-}" ] && TAG="${TAG}_wc${SMALLHANDS_WAIT_CONF}"   # 確信度の閾値つきの run はログを分ける
 PLANTAG=$(basename "$PLAN" .txt | sed 's/^plan_//')
 LOG="$ROOT/logs/${PLANTAG}_${TAG}.csv"
 OUT="$ROOT/logs/${PLANTAG}_${TAG}.out"

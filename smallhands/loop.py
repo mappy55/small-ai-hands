@@ -828,6 +828,9 @@ def main():
     ap.add_argument("--no-prune", action="store_true")
     ap.add_argument("--no-collection", action="store_true", help="Collection を使わず木を歩く（比較用）")
     ap.add_argument("--dump", default="logs/prompts", help="各ステップのプロンプトと答えを保存するディレクトリ（'' で無効）")
+    ap.add_argument("--wait-conf", type=float, default=float(os.environ.get("SMALLHANDS_WAIT_CONF", "0")),
+                    help="確信度付きの手足（Jev）が WAIT を選んだとき、確信度がこの値未満なら 12 秒待たずに短く待って聞き直す（0 で無効）")
+    ap.add_argument("--wait-short", type=float, default=2.0, help="--wait-conf で短く待つときの秒数")
     a = ap.parse_args()
 
     THINK = True if a.think else (False if a.nothink else None)
@@ -933,6 +936,7 @@ def main():
         note = "\n(The page is still loading.)" if "busy:" in docs else ""
         print(f"    tree {t_tree*1000:.0f}ms ({len(items_all)} items, {len(items)} shown) — asking {a.model} ...", flush=True)
         signal.alarm(0)                       # 番犬は AT-SPI の詰まり用。LLM の待ち（モデルの初回読み込みで 60s を超えることがある）は urllib の timeout に任せる
+        JEV_LAST.clear()
         ask = ask_claude if a.model.startswith("claude") else ask_jev if a.model.startswith("jev") else ask_ollama
         ans, t_llm, r, prompt = ask(a.model, goal_text, windows, history, choices_text, note)
         signal.alarm(STEP_TIMEOUT)
@@ -992,8 +996,14 @@ def main():
             t_action = time.time() - t0
         except Exception as e:
             ok = 0; action = f"error:{e}"; print("   !! action failed:", e)
+        wait_timeout = 12.0
+        conf = JEV_LAST.get("confidence")
+        if ch["kind"] == "wait" and a.wait_conf and conf is not None and conf < a.wait_conf:
+            # 様子見の確信度が低い（ページはもう読み込まれていることが多い）→ タイムアウトまで待たずに短く待って聞き直す
+            wait_timeout = a.wait_short
+            print(f"      (WAIT with low confidence {conf:.2f} < {a.wait_conf} — waiting only {a.wait_short:.0f}s before asking again)")
         if cond:
-            t_wait, met = wait_until(app, cond, before=before)
+            t_wait, met = wait_until(app, cond, timeout=wait_timeout, before=before)
             if not met:
                 print(f"      (condition '{cond}' not met yet)")
         else:
