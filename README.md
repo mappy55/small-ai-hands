@@ -1,5 +1,7 @@
 # small-ai-hands — 小さなAIで手足をうごかす
 
+**English summary.** A hobby experiment in letting *small* models drive Linux desktop apps (GNOME / Wayland). The screen is read as the **AT-SPI2 accessibility tree**, not screenshots; actions go through AT-SPI2 `Action`, with a real keyboard (ydotool) only where the tree cannot write. Three layers: a **planner** (Claude via API) turns a request into a plan file of one-line sub-goals, each with a machine-checkable condition; an **executor** picks one numbered action from what is visible right now; the **loop** (`smallhands/loop.py`) performs the action and polls until the condition holds. The executor can be a local 4B model (qwen3:4b-instruct on a 6 GB RTX 3050 via Ollama), Claude Haiku/Sonnet, or **Jev** (TypeSafe AI's decision-only model, `--model jev-latest`, whose confidence score lets the loop cut a low-confidence WAIT from 12 s to 2 s). On the same 4-line plan, all executors succeed; a plain run takes 12–20 s, the local 4B costs only electricity, Sonnet ≈ ¥2, Haiku ≈ ¥0.1, Jev ≈ ¥0.04 per run. Timings and failure modes are logged per step and written up (in Japanese) in the Zenn series linked below. Similar ideas at production scale: Microsoft UFO2, UI-TARS; this repo is the minimal, reproducible, numbers-first version.
+
 RTX 3050 のノート PC で動く 4B クラスのローカル LLM（Ollama）に、Linux デスクトップのアプリを操作させる趣味の実験コードです。
 画面はスクリーンショットではなく **アクセシビリティツリー（AT-SPI2）** で読み、操作も AT-SPI2 の Action で押します。押せない・書けないところだけキーボード（ydotool）で補います。
 
@@ -8,6 +10,9 @@ Zenn の連載「小さなAIで手足をうごかす」の実験に使ってい�
 - [#1 RTX 3050 のノートで Qwen3 4B に gedit を操作させたら、4手8.6秒だった](https://zenn.dev/mappy55/articles/small-ai-hands-01)
 - [#2 小さくしても速くならず、考えさせると7倍遅い](https://zenn.dev/mappy55/articles/small-ai-hands-02)
 - [#3 Firefox は読めるけど書けない。4B に目次を開かせて「歴史」を読ませるまで](https://zenn.dev/mappy55/articles/small-ai-hands-03)
+- [#4 依頼文一つで最後まで。計画は Claude、手は 4B、落ちたのは手と段取り](https://zenn.dev/mappy55/articles/small-ai-hands-04)
+- [#5 手足も Claude にしたら。4B・Haiku・Sonnet を同じ計画で、秒数と成否と値段で比べる](https://zenn.dev/mappy55/articles/small-ai-hands-05)
+- [#6 選ぶだけのモデル Jev を手足にしたら、同じ計画が 12 秒・0.04 円で通った](https://zenn.dev/mappy55/articles/small-ai-hands-06)
 
 ## 構成
 
@@ -15,8 +20,8 @@ Zenn の連載「小さなAIで手足をうごかす」の実験に使ってい�
 
 | 層 | 誰が | 何をする |
 |---|---|---|
-| 計画層 | Claude（いまは会話の中で手書き） | 依頼文を「1 行 1 サブ目標＋達成条件」の計画ファイルにする |
-| 実行層 | qwen3:4b-instruct など小さなモデル | 今のサブ目標と番号付きの選択肢だけを見て、番号を答える |
+| 計画層 | Claude（`smallhands/planner.py`、API） | 依頼文を「1 行 1 サブ目標＋達成条件」の計画ファイルにする |
+| 実行層 | qwen3:4b-instruct など小さなモデル（Claude や Jev にも差し替え可） | 今のサブ目標と番号付きの選択肢だけを見て、番号を答える |
 | 判定層 | `smallhands/loop.py` | AT-SPI2 か ydotool で実行し、達成条件が満たされるまで待つ |
 
 計画ファイルはこういう形です（`plans/plan_tokyo_history.txt`）。
@@ -74,7 +79,7 @@ bash scripts/run_request.sh "Firefox で Wikipedia の東京駅を調べて、�
 
 ## 実行層を Claude にする
 
-`--model claude-...` を渡すと、実行層（番号を選ぶ側）も Anthropic API になります。同じ約束・同じ選択肢を渡し、tool_use で `{choice, text}` を返させます。ローカル LLM との比較用です。
+`--model claude-...` を渡すと、実行層（番号を選ぶ側）も Anthropic API になります。同じ約束・同じ選択肢を渡し、返事の本文から `{choice, text}` の JSON を拾います（Claude 5 系は tool_choice の強制が使えないため）。ローカル LLM との比較用です。
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
