@@ -6,8 +6,9 @@ echo "== tools:"; for t in gnome-screenshot grim spectacle import scrot ydotool 
 python3 -c "import PIL; print('   PIL', PIL.__version__)" 2>/dev/null || echo "   PIL -  (sudo apt install python3-pil)"
 OUT=/tmp/cu_probe.png; rm -f "$OUT"
 echo "== screenshot:"
-if command -v gnome-screenshot >/dev/null; then
-  gnome-screenshot -f "$OUT" 2>&1 | sed 's/^/   /'
+# gnome-screenshot は GNOME 41 以降の Wayland では撮れず、エラーダイアログを出して戻ってこないので飛ばす（SKIP_GS=0 で試す）
+if [ "${SKIP_GS:-1}" = 0 ] && command -v gnome-screenshot >/dev/null; then
+  timeout 5 gnome-screenshot -f "$OUT" 2>&1 | sed 's/^/   /'
 fi
 if [ ! -s "$OUT" ]; then
   # GNOME Shell の D-Bus（許可されたアプリ以外は拒否されることがある）
