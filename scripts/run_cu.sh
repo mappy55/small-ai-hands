@@ -3,6 +3,7 @@
 #   使い方: bash scripts/run_cu.sh "依頼文" "達成条件" [model] [runs] [tag]
 #   例:     bash scripts/run_cu.sh "Firefox で Wikipedia の東京駅を開いて、歴史の節を読んで" "url:#歴史" claude-sonnet-5-5 3 tokyo_history
 #   必要: ANTHROPIC_API_KEY、ydotoold、python3-pil（スクショは GNOME の Shift+Print を ydotool で押して撮る）
+#   VirtualBox のマウス統合は OFF にしておく（Host+I）。画面全体を撮るので、Firefox 以外の窓は手前に出さない
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REQ=${1:?"依頼文を渡してください"}

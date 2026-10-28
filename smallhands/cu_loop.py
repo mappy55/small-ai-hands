@@ -9,7 +9,8 @@ cu_loop.py — スクショ方式の手足。Claude の computer use（computer_
 - 画面: GNOME のショートカット Shift+Print を ydotool で押して保存させ、その PNG を拾う（必要なら縮小）。座標は元の解像度に戻してから押す。
 - 操作: ydotool（mousemove --absolute / click / key / type）。キーボードの打ち方は loop.py のものを使う。
 - 判定: 成功したかどうかは loop.py と同じ達成条件（--cond）を AT-SPI で見る。Claude の「できました」は信じない。
-- 必要: ANTHROPIC_API_KEY、ydotoold、python3-pil、GNOME の Shift+Print（全画面を保存）が有効なこと
+- 必要: ANTHROPIC_API_KEY、ydotoold、python3-pil、GNOME の Shift+Print（全画面を保存）が有効なこと。
+  VirtualBox ではマウス統合を OFF にする（ON だとホストのマウス位置に引き戻されてクリックがずれる）。run_cu.sh が通知バナーとポインタ加速を切る。
 """
 import sys, os, re, json, time, argparse, base64, io, subprocess, urllib.request, urllib.error
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -203,6 +204,8 @@ def main():
     if a.launch:
         app, t_l = L.step_launch("firefox --profile $HOME/ffprof about:blank", a.app, "window:mozilla firefox")
         print(f"[launch] firefox in {t_l*1000:.0f}ms"); time.sleep(1.0)
+        # 画面全体を撮るので、手前に端末などが残っていると Claude はそれを見てしまう → Firefox を最大化して覆う（GNOME: Super+↑）
+        ydo("key", "125:1", "103:1", "103:0", "125:0"); time.sleep(0.8)
     else:
         app = L.find_app(a.app)
 
