@@ -17,7 +17,23 @@ fi
 if [ -s "$OUT" ]; then
   python3 -c "from PIL import Image; im=Image.open('$OUT'); print('   OK', im.size, im.mode)" 2>/dev/null || ls -la "$OUT" | sed 's/^/   /'
 else
-  echo "   NG: スクショが撮れない（Xorg セッションに切り替えて scrot/import を使うか、方法を変える）"
+  echo "   NG: gnome-screenshot / D-Bus では撮れない → GNOME Shell のショートカット（Shift+Print = 全画面を保存）を ydotool で押して試す"
+  export YDOTOOL_SOCKET=${YDOTOOL_SOCKET:-/tmp/.ydotool_socket}
+  PICS=$(xdg-user-dir PICTURES 2>/dev/null || echo "$HOME/Pictures")
+  SDIR=""; for d in "$PICS/Screenshots" "$PICS/スクリーンショット"; do [ -d "$d" ] && SDIR="$d"; done
+  [ -z "$SDIR" ] && SDIR="$PICS/Screenshots"
+  echo "   保存先の候補: $SDIR"
+  BEFORE=$(ls -1 "$SDIR" 2>/dev/null | wc -l)
+  ydotool key 42:1 99:1 99:0 42:0      # shift+print
+  sleep 1.5
+  AFTER=$(ls -1 "$SDIR" 2>/dev/null | wc -l)
+  NEW=$(ls -t "$SDIR"/*.png 2>/dev/null | head -1)
+  if [ "$AFTER" -gt "$BEFORE" ] && [ -n "$NEW" ]; then
+    python3 -c "from PIL import Image; im=Image.open('$NEW'); print('   OK via Shift+Print:', '$NEW', im.size)"
+  else
+    echo "   NG: Shift+Print でも保存されない（設定 → キーボード → ショートカット → スクリーンショットの割り当てを確認）"
+    echo "   最後の手: ログイン画面で「Ubuntu on Xorg」を選び、sudo apt install scrot で撮る"
+  fi
 fi
 echo "== mouse (ydotool):"
 export YDOTOOL_SOCKET=${YDOTOOL_SOCKET:-/tmp/.ydotool_socket}
