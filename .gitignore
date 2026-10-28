@@ -10,3 +10,5 @@ __pycache__/
 # Firefox の専用プロファイルは $HOME/ffprof に作る（リポジトリ外）
 .env
 plans/generated*.txt
+logs/cu_shots/
+*.jsonl
