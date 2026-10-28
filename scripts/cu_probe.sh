@@ -11,8 +11,10 @@ if command -v gnome-screenshot >/dev/null; then
 fi
 if [ ! -s "$OUT" ]; then
   # GNOME Shell の D-Bus（許可されたアプリ以外は拒否されることがある）
-  gdbus call --session --dest org.gnome.Shell.Screenshot --object-path /org/gnome/Shell/Screenshot \
+  echo "   (gnome-screenshot NG → D-Bus を試す)"
+  timeout 10 gdbus call --session --dest org.gnome.Shell.Screenshot --object-path /org/gnome/Shell/Screenshot \
     --method org.gnome.Shell.Screenshot.Screenshot false false "$OUT" 2>&1 | sed 's/^/   gdbus: /'
+  echo "   (D-Bus 終了)"
 fi
 if [ -s "$OUT" ]; then
   python3 -c "from PIL import Image; im=Image.open('$OUT'); print('   OK', im.size, im.mode)" 2>/dev/null || ls -la "$OUT" | sed 's/^/   /'
@@ -24,10 +26,12 @@ else
   [ -z "$SDIR" ] && SDIR="$PICS/Screenshots"
   echo "   保存先の候補: $SDIR"
   BEFORE=$(ls -1 "$SDIR" 2>/dev/null | wc -l)
-  ydotool key 42:1 99:1 99:0 42:0      # shift+print
+  echo "   Shift+Print を押します（シャッター音が鳴れば撮れている）"
+  timeout 10 ydotool key 42:1 99:1 99:0 42:0      # shift+print
   sleep 1.5
   AFTER=$(ls -1 "$SDIR" 2>/dev/null | wc -l)
   NEW=$(ls -t "$SDIR"/*.png 2>/dev/null | head -1)
+  echo "   $SDIR: before=$BEFORE after=$AFTER newest=${NEW:-なし}"
   if [ "$AFTER" -gt "$BEFORE" ] && [ -n "$NEW" ]; then
     python3 -c "from PIL import Image; im=Image.open('$NEW'); print('   OK via Shift+Print:', '$NEW', im.size)"
   else
