@@ -6,10 +6,10 @@ cu_loop.py — スクショ方式の手足。Claude の computer use（computer_
 
   python3 smallhands/cu_loop.py "Firefox で Wikipedia の東京駅を開いて、歴史の節を読んで" --cond "url:#歴史" --launch
 
-- 画面: gnome-screenshot（GNOME Shell の D-Bus）で撮り、必要なら縮小して渡す。座標は元の解像度に戻してから押す。
+- 画面: GNOME のショートカット Shift+Print を ydotool で押して保存させ、その PNG を拾う（必要なら縮小）。座標は元の解像度に戻してから押す。
 - 操作: ydotool（mousemove --absolute / click / key / type）。キーボードの打ち方は loop.py のものを使う。
 - 判定: 成功したかどうかは loop.py と同じ達成条件（--cond）を AT-SPI で見る。Claude の「できました」は信じない。
-- 必要: ANTHROPIC_API_KEY、ydotoold、python3-pil
+- 必要: ANTHROPIC_API_KEY、ydotoold、python3-pil、GNOME の Shift+Print（全画面を保存）が有効なこと
 """
 import sys, os, re, json, time, argparse, base64, io, subprocess, urllib.request, urllib.error
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,7 +18,6 @@ import loop as L                     # kb_type / kb_combo / ydo / condition_met 
 from PIL import Image
 
 API = "https://api.anthropic.com/v1/messages"
-SHOT = "/tmp/cu_shot.png"
 
 SYSTEM = ("You are operating a Linux desktop (GNOME) through screenshots. The user's request is in Japanese; the web pages are Japanese Wikipedia. "
           "Work step by step: take a screenshot, decide one action, act, and take a screenshot again to verify. "
@@ -34,17 +33,50 @@ XKEY = {"return": 28, "enter": 28, "tab": 15, "escape": 1, "esc": 1, "backspace"
 XKEY.update({c: L._LETTERS[c] for c in L._LETTERS})
 XKEY.update({d: L._DIGITS[d] for d in L._DIGITS})
 
+def _shots_dir():
+    try:
+        pics = subprocess.run(["xdg-user-dir", "PICTURES"], capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        pics = ""
+    pics = pics or os.path.expanduser("~/Pictures")
+    for name in ("Screenshots", "スクリーンショット"):
+        d = os.path.join(pics, name)
+        if os.path.isdir(d):
+            return d
+    d = os.path.join(pics, "Screenshots"); os.makedirs(d, exist_ok=True); return d
+
+SHOTS_DIR = None
+
 def screenshot(scale):
-    """gnome-screenshot で撮って (base64 png, 元サイズ, 送るサイズ) を返す"""
-    for _ in range(3):
-        if os.path.exists(SHOT):
-            os.remove(SHOT)
-        subprocess.run(["gnome-screenshot", "-f", SHOT], check=False, timeout=15,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if os.path.exists(SHOT) and os.path.getsize(SHOT) > 0:
+    """GNOME Shell のショートカット Shift+Print（全画面を即保存）を ydotool で押し、保存された PNG を拾う。
+    gnome-screenshot と org.gnome.Shell.Screenshot は GNOME 41 以降の Wayland では外部から使えない。
+    戻り値: (base64 png, 元サイズ, 送るサイズ)"""
+    global SHOTS_DIR
+    SHOTS_DIR = SHOTS_DIR or _shots_dir()
+    before = set(os.listdir(SHOTS_DIR))
+    t0 = time.time()
+    L.ydo("key", "42:1", "99:1", "99:0", "42:0")          # shift+print
+    path = None
+    while time.time() - t0 < 4.0:
+        new = [f for f in os.listdir(SHOTS_DIR) if f not in before and f.lower().endswith(".png")]
+        if new:
+            path = os.path.join(SHOTS_DIR, sorted(new)[-1])
+            # 書き終わるのを待つ（サイズが 2 回続けて同じ）
+            last = -1
+            for _ in range(20):
+                sz = os.path.getsize(path)
+                if sz > 0 and sz == last:
+                    break
+                last = sz; time.sleep(0.05)
             break
-        time.sleep(0.3)
-    im = Image.open(SHOT).convert("RGB")
+        time.sleep(0.05)
+    if path is None:
+        raise RuntimeError("screenshot not saved (Shift+Print) — check GNOME keyboard shortcuts")
+    im = Image.open(path).convert("RGB")
+    try:
+        os.remove(path)                                     # 溜めない
+    except OSError:
+        pass
     full = im.size
     if scale != 1.0:
         im = im.resize((round(full[0] * scale), round(full[1] * scale)), Image.LANCZOS)

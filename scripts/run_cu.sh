@@ -2,7 +2,7 @@
 # スクショ方式（Claude computer use）で同じ依頼を回す。木を読む loop.py との比較用
 #   使い方: bash scripts/run_cu.sh "依頼文" "達成条件" [model] [runs] [tag]
 #   例:     bash scripts/run_cu.sh "Firefox で Wikipedia の東京駅を開いて、歴史の節を読んで" "url:#歴史" claude-sonnet-5-5 3 tokyo_history
-#   必要: ANTHROPIC_API_KEY、ydotoold、gnome-screenshot、python3-pil
+#   必要: ANTHROPIC_API_KEY、ydotoold、python3-pil（スクショは GNOME の Shift+Print を ydotool で押して撮る）
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 REQ=${1:?"依頼文を渡してください"}
@@ -14,7 +14,6 @@ cd "$ROOT"
 [ -n "${ANTHROPIC_API_KEY:-}" ] || { echo "ANTHROPIC_API_KEY が設定されていません"; exit 1; }
 export YDOTOOL_SOCKET=${YDOTOOL_SOCKET:-/tmp/.ydotool_socket}
 [ -S "$YDOTOOL_SOCKET" ] || { echo "ydotoold が動いていません: bash scripts/setup_ydotool.sh"; exit 1; }
-command -v gnome-screenshot >/dev/null || { echo "gnome-screenshot がありません: sudo apt install gnome-screenshot"; exit 1; }
 MTAG=$(echo "$MODEL" | tr ':/' '__')
 OUT="$ROOT/logs/cu_${TAG}_${MTAG}.out"
 LOG="$ROOT/logs/cu_${TAG}_${MTAG}.jsonl"
