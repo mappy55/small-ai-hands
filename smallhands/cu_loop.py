@@ -172,14 +172,25 @@ def call_api(key, model, messages, max_tokens=1024):
         raise RuntimeError(f"Anthropic API {e.code}: {e.read().decode('utf-8', 'replace')[:400]}")
     return r, time.time() - t0
 
-def judge(app, cond):
-    if not cond or app is None:
+def judge(app, cond, appname="firefox"):
+    """達成条件を AT-SPI で判定する。app が古くなっていることがあるので同名のアプリを全部見て、満たせば True。
+    満たさなければ最後に見た状態を表示する（判定側の穴を疑えるように）"""
+    if not cond:
         return None
-    try:
-        windows, items, docs = L.quick_state(app) if L.USE_COLLECTION else L.collect(app)
-        return L.condition_met(cond, windows, items, docs)
-    except Exception:
-        return False
+    last = None
+    for _ in range(3):
+        cands = list(L.find_apps(appname)) or ([app] if app is not None else [])
+        for cand in cands:
+            try:
+                windows, items, docs = L.quick_state(cand) if L.USE_COLLECTION else L.collect(cand)
+                if L.condition_met(cond, windows, items, docs):
+                    return True
+                last = (windows, [it.get("text") for it in items if it.get("kind") == "keytype"], docs)
+            except Exception as e:
+                last = ("error", str(e)[:120])
+        time.sleep(0.5)
+    print(f"      (judge: condition not met; last state {last})")
+    return False
 
 def main():
     ap = argparse.ArgumentParser()
@@ -261,7 +272,7 @@ def main():
                                     "act_ms": round(t_act*1000), "err": err, "in": u.get("input_tokens"), "out": u.get("output_tokens")},
                                    ensure_ascii=False) + "\n")
         messages.append({"role": "user", "content": results})
-    ok = judge(app, a.cond)
+    ok = judge(app, a.cond, a.app)
     t_run = time.time() - t_run0
     print(f"== run total {t_run:.1f}s, {step} actions, {n_shots} screenshots, stop={stop}, "
           f"condition {a.cond or '-'}: {'MET' if ok else ('not met' if ok is not None else '-')}, "
