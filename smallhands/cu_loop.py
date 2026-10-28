@@ -33,6 +33,10 @@ XKEY = {"return": 28, "enter": 28, "tab": 15, "escape": 1, "esc": 1, "backspace"
 XKEY.update({c: L._LETTERS[c] for c in L._LETTERS})
 XKEY.update({d: L._DIGITS[d] for d in L._DIGITS})
 
+def ydo(*args):
+    env = dict(os.environ, YDOTOOL_SOCKET=L.YDOTOOL_SOCKET)
+    subprocess.run(["ydotool", *args], env=env, check=True, timeout=20, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
 def _shots_dir():
     try:
         pics = subprocess.run(["xdg-user-dir", "PICTURES"], capture_output=True, text=True, timeout=5).stdout.strip()
@@ -55,7 +59,7 @@ def screenshot(scale):
     SHOTS_DIR = SHOTS_DIR or _shots_dir()
     before = set(os.listdir(SHOTS_DIR))
     t0 = time.time()
-    L.ydo("key", "42:1", "99:1", "99:0", "42:0")          # shift+print
+    ydo("key", "42:1", "99:1", "99:0", "42:0")          # shift+print
     path = None
     while time.time() - t0 < 4.0:
         new = [f for f in os.listdir(SHOTS_DIR) if f not in before and f.lower().endswith(".png")]
@@ -87,13 +91,13 @@ def to_full(coord, scale):
     return [round(coord[0] / scale), round(coord[1] / scale)]
 
 def mouse_move(x, y):
-    L.ydo("mousemove", "--absolute", "-x", str(x), "-y", str(y))
+    ydo("mousemove", "--absolute", "-x", str(x), "-y", str(y))
 
 def click(x, y, button="left", times=1):
     mouse_move(x, y); time.sleep(0.05)
     code = {"left": "0xC0", "right": "0xC1", "middle": "0xC2"}[button]
     for _ in range(times):
-        L.ydo("click", code); time.sleep(0.08)
+        ydo("click", code); time.sleep(0.08)
 
 def key_combo(text, repeat=1):
     """'ctrl+l' / 'Return' / 'Page_Down' のような指定を ydotool key で"""
@@ -104,13 +108,13 @@ def key_combo(text, repeat=1):
             raise ValueError(f"unknown key {n!r}")
         codes.append(XKEY[n])
     for _ in range(repeat):
-        L.ydo("key", *[f"{c}:1" for c in codes], *[f"{c}:0" for c in reversed(codes)]); time.sleep(0.05)
+        ydo("key", *[f"{c}:1" for c in codes], *[f"{c}:0" for c in reversed(codes)]); time.sleep(0.05)
 
 def scroll(x, y, direction, amount):
     mouse_move(x, y); time.sleep(0.05)
     # ydotool の wheel は縦のみ（負で下）。横は ctrl 無しのキーで代用しない（Firefox では shift+wheel が横）
     step = -amount if direction == "down" else amount
-    L.ydo("mousemove", "--wheel", "-y", str(step))
+    ydo("mousemove", "--wheel", "-y", str(step))
 
 def do_action(name, inp, scale):
     """computer toolset の 1 手を実行して (text or None, error) を返す。screenshot は呼び出し側で撮る"""
@@ -123,7 +127,7 @@ def do_action(name, inp, scale):
         times = {"double_click": 2, "triple_click": 3}.get(name, 1)
         if inp.get("text"):                      # 修飾キーつきクリック
             codes = [XKEY[n.strip().lower()] for n in inp["text"].split("+")]
-            L.ydo("key", *[f"{k}:1" for k in codes]); click(x, y, btn, times); L.ydo("key", *[f"{k}:0" for k in reversed(codes)])
+            ydo("key", *[f"{k}:1" for k in codes]); click(x, y, btn, times); ydo("key", *[f"{k}:0" for k in reversed(codes)])
         else:
             click(x, y, btn, times)
         return f"clicked ({x},{y})"
@@ -131,17 +135,23 @@ def do_action(name, inp, scale):
         x, y = to_full(c, scale); mouse_move(x, y); return "moved"
     if name == "left_click_drag":
         x0, y0 = to_full(inp["start_coordinate"], scale); x1, y1 = to_full(c, scale)
-        mouse_move(x0, y0); L.ydo("click", "0x40"); mouse_move(x1, y1); L.ydo("click", "0x80"); return "dragged"
+        mouse_move(x0, y0); ydo("click", "0x40"); mouse_move(x1, y1); ydo("click", "0x80"); return "dragged"
     if name == "type":
-        text = " ".join(inp.get("text", "").split("\n"))
-        L.kb_type(text); return f"typed {len(text)} chars"
+        raw = inp.get("text", "")
+        enter = raw.endswith("\n")
+        text = " ".join(raw.strip("\n").split("\n"))
+        if text:
+            L.kb_type(text)
+        if enter:
+            time.sleep(0.2); key_combo("Return")
+        return f"typed {len(text)} chars" + (" + Return" if enter else "")
     if name == "key":
         key_combo(inp["text"], int(inp.get("repeat", 1))); return f"key {inp['text']}"
     if name == "scroll":
         x, y = to_full(c, scale) if c else (640, 400)
         scroll(x, y, inp.get("scroll_direction", "down"), int(inp.get("scroll_amount", 3))); return "scrolled"
     if name == "wait":
-        time.sleep(min(float(inp.get("duration", 1)), 10)); return "waited"
+        d = min(float(inp.get("duration", 1)), 10); time.sleep(d); return f"waited {d:.0f}s"
     if name == "cursor_position":
         return "unknown"
     if name in ("left_mouse_down", "left_mouse_up", "hold_key", "zoom"):

@@ -19,6 +19,10 @@ OUT="$ROOT/logs/cu_${TAG}_${MTAG}.out"
 LOG="$ROOT/logs/cu_${TAG}_${MTAG}.jsonl"
 mkdir -p logs
 # Firefox のプロファイルは run_batch.sh と同じもの（user.js はそちらで作られている）
+# GNOME の通知バナー（「Screenshot captured」）が毎回 URL バーの上に被さるので、run の間は切る
+BANNERS=$(gsettings get org.gnome.desktop.notifications show-banners 2>/dev/null || echo true)
+gsettings set org.gnome.desktop.notifications show-banners false 2>/dev/null
+trap 'gsettings set org.gnome.desktop.notifications show-banners "$BANNERS" 2>/dev/null' EXIT
 echo "== computer use: $MODEL x $RUNS  req=$REQ  cond=$COND" | tee -a "$OUT"
 for i in $(seq 1 "$RUNS"); do
   pkill -TERM -x firefox 2>/dev/null; pkill -TERM -f 'firefox-bin' 2>/dev/null
