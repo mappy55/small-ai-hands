@@ -22,7 +22,10 @@ mkdir -p logs
 # GNOME の通知バナー（「Screenshot captured」）が毎回 URL バーの上に被さるので、run の間は切る
 BANNERS=$(gsettings get org.gnome.desktop.notifications show-banners 2>/dev/null || echo true)
 gsettings set org.gnome.desktop.notifications show-banners false 2>/dev/null
-trap 'gsettings set org.gnome.desktop.notifications show-banners "$BANNERS" 2>/dev/null' EXIT
+# ydotool の絶対座標移動は中身が相対移動なので、GNOME のポインタ加速が掛かるとクリック位置がずれる → run の間は加速を切る
+ACCEL=$(gsettings get org.gnome.desktop.peripherals.mouse accel-profile 2>/dev/null || echo "'default'")
+gsettings set org.gnome.desktop.peripherals.mouse accel-profile 'flat' 2>/dev/null
+trap 'gsettings set org.gnome.desktop.notifications show-banners "$BANNERS" 2>/dev/null; gsettings set org.gnome.desktop.peripherals.mouse accel-profile "$ACCEL" 2>/dev/null' EXIT
 echo "== computer use: $MODEL x $RUNS  req=$REQ  cond=$COND" | tee -a "$OUT"
 for i in $(seq 1 "$RUNS"); do
   pkill -TERM -x firefox 2>/dev/null; pkill -TERM -f 'firefox-bin' 2>/dev/null
