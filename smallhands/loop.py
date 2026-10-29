@@ -684,7 +684,23 @@ def ask_ollama(model, goal, windows, history, choices_text, note=""):
     with urllib.request.urlopen(req, timeout=300) as resp:
         r = json.loads(resp.read())
     wall = time.time() - t0
-    ans = json.loads(r["message"]["content"])
+    msg = r.get("message", {})
+    content = msg.get("content", "") or ""
+    thinking = msg.get("thinking", "") or ""
+    try:
+        ans = json.loads(content)
+    except json.JSONDecodeError:
+        # 思考つきのモデルが JSON を返さない／途中で切れることがある → 本文（なければ思考）から最後の {...} を拾う
+        m = None
+        for m in re.finditer(r"\{[^{}]*\}", content + "\n" + thinking):
+            pass
+        try:
+            ans = json.loads(m.group(0)) if m else {"choice": 0, "text": ""}
+        except json.JSONDecodeError:
+            ans = {"choice": 0, "text": ""}
+        print(f"      (ollama reply was not JSON: content={content[:80]!r} thinking={len(thinking)} chars, done_reason={r.get('done_reason')!r})")
+    if thinking:
+        r["thinking_chars"] = len(thinking)
     return ans, wall, r, user
 
 # ---------------------------------------------------------------- 実行（AT-SPI）
