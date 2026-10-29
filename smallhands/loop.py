@@ -533,11 +533,108 @@ def ask_jev(model, goal, windows, history, choices_text, note=""):
           "prompt_eval_duration": 0, "eval_duration": int(wall * 1e9)}
     return {"choice": idx, "text": text}, wall, rr, user + f"\n\n(jev criteria: {len(criteria)} options)"
 
+# ---------------------------------------------------------------- スクショ（画像対応モデル向け。--shot plain|marks）
+SHOT = {"mode": None, "b64": None, "ms": 0, "n_marks": 0}   # いまの手の画像（ask_* が読む）
+
+def _shots_dir():
+    try:
+        pics = subprocess.run(["xdg-user-dir", "PICTURES"], capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        pics = ""
+    pics = pics or os.path.expanduser("~/Pictures")
+    for name in ("Screenshots", "スクリーンショット"):
+        d = os.path.join(pics, name)
+        if os.path.isdir(d):
+            return d
+    d = os.path.join(pics, "Screenshots"); os.makedirs(d, exist_ok=True); return d
+
+_SHOTS_DIR = None
+
+def grab_screen():
+    """GNOME のショートカット Shift+Print（全画面を即保存）を ydotool で押し、保存された PNG を PIL.Image で返す。
+    gnome-screenshot と org.gnome.Shell.Screenshot は GNOME 41 以降の Wayland では外部から使えない"""
+    from PIL import Image
+    global _SHOTS_DIR
+    _SHOTS_DIR = _SHOTS_DIR or _shots_dir()
+    before = set(os.listdir(_SHOTS_DIR))
+    t0 = time.time()
+    env = dict(os.environ, YDOTOOL_SOCKET=YDOTOOL_SOCKET)
+    subprocess.run(["ydotool", "key", "42:1", "99:1", "99:0", "42:0"], env=env, check=True, timeout=20,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    path = None
+    while time.time() - t0 < 4.0:
+        new = [f for f in os.listdir(_SHOTS_DIR) if f not in before and f.lower().endswith(".png")]
+        if new:
+            path = os.path.join(_SHOTS_DIR, sorted(new)[-1])
+            last = -1
+            for _ in range(20):
+                sz = os.path.getsize(path)
+                if sz > 0 and sz == last:
+                    break
+                last = sz; time.sleep(0.05)
+            break
+        time.sleep(0.05)
+    if path is None:
+        raise RuntimeError("screenshot not saved (Shift+Print) — check GNOME keyboard shortcuts")
+    im = Image.open(path).convert("RGB")
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return im
+
+def mark_screenshot(im, choices):
+    """Set-of-Mark: 選択肢の部品の矩形（AT-SPI）に一覧と同じ番号の札を描く。戻り値: 札を描けた数"""
+    from PIL import ImageDraw, ImageFont
+    d = ImageDraw.Draw(im)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 13)
+    except Exception:
+        font = ImageFont.load_default()
+    n = 0
+    for i, ch in enumerate(choices):
+        acc = ch.get("acc")
+        if acc is None:
+            continue
+        r = _rect(acc)
+        if not r or r[2] <= 0 or r[3] <= 0:
+            continue
+        x, y, w, h = r
+        if x + w < 0 or y + h < 0 or x > im.width or y > im.height:
+            continue
+        label = str(i + 1)
+        tw = d.textlength(label, font=font) + 6; th = 16
+        lx, ly = max(0, x - 2), max(0, y - th)         # 部品の左上の少し上に札
+        d.rectangle([x, y, x + w, y + h], outline=(230, 40, 40), width=1)
+        d.rectangle([lx, ly, lx + tw, ly + th], fill=(230, 40, 40))
+        d.text((lx + 3, ly + 1), label, fill=(255, 255, 255), font=font)
+        n += 1
+    return n
+
+def prepare_shot(mode, choices, max_side=1280):
+    """--shot のモードに応じて画像を撮り、SHOT に base64 を入れる。長辺が max_side を超えたら縮める（札は縮小前に描く）"""
+    import io, base64
+    t0 = time.time()
+    im = grab_screen()
+    n = mark_screenshot(im, choices) if mode == "marks" else 0
+    if max(im.size) > max_side:
+        from PIL import Image
+        sc = max_side / max(im.size)
+        im = im.resize((round(im.width * sc), round(im.height * sc)), Image.LANCZOS)
+    buf = io.BytesIO(); im.save(buf, format="PNG")
+    SHOT.update({"mode": mode, "b64": base64.b64encode(buf.getvalue()).decode(), "ms": int((time.time() - t0) * 1000), "n_marks": n})
+    return buf.getvalue()
+
 def ask_ollama(model, goal, windows, history, choices_text, note=""):
     user = build_user_prompt(goal, windows, history, choices_text, note)
+    umsg = {"role": "user", "content": user}
+    if SHOT.get("b64"):
+        umsg["images"] = [SHOT["b64"]]
+        umsg["content"] = user + ("\n\n(A screenshot of the screen is attached. The red numbered labels on it are the same numbers as the action list.)"
+                                  if SHOT.get("mode") == "marks" else "\n\n(A screenshot of the screen is attached.)")
     body = {"model": model, "stream": False, "format": SCHEMA,
             "options": {"num_ctx": NUM_CTX, "temperature": 0},
-            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]}
+            "messages": [{"role": "system", "content": SYSTEM}, umsg]}
     if THINK is not None:
         body["think"] = THINK
     req = urllib.request.Request(f"{OLLAMA}/api/chat", data=json.dumps(body).encode(),
@@ -831,6 +928,8 @@ def main():
     ap.add_argument("--wait-conf", type=float, default=float(os.environ.get("SMALLHANDS_WAIT_CONF", "0")),
                     help="確信度付きの手足（Jev）が WAIT を選んだとき、確信度がこの値未満なら 12 秒待たずに短く待って聞き直す（0 で無効）")
     ap.add_argument("--wait-short", type=float, default=2.0, help="--wait-conf で短く待つときの秒数")
+    ap.add_argument("--shot", choices=["none", "plain", "marks"], default=os.environ.get("SMALLHANDS_SHOT", "none"),
+                    help="手足にスクショも渡す（画像対応モデル向け）。plain=素のスクショ、marks=選択肢の番号の札を描いたスクショ（Set-of-Mark）")
     a = ap.parse_args()
 
     THINK = True if a.think else (False if a.nothink else None)
@@ -934,7 +1033,18 @@ def main():
 
         goal_text = goal if len(goals) == 1 else f"(sub-goal {gi+1}/{len(goals)}) {goal}"
         note = "\n(The page is still loading.)" if "busy:" in docs else ""
-        print(f"    tree {t_tree*1000:.0f}ms ({len(items_all)} items, {len(items)} shown) — asking {a.model} ...", flush=True)
+        SHOT.update({"mode": None, "b64": None, "ms": 0, "n_marks": 0})
+        if a.shot != "none":
+            try:
+                png = prepare_shot(a.shot, choices)
+                if a.dump:
+                    os.makedirs(a.dump, exist_ok=True)
+                    with open(os.path.join(a.dump, f"{time.strftime('%H%M%S')}_step{step}_{a.shot}.png"), "wb") as f:
+                        f.write(png)
+            except Exception as e:
+                print(f"      (screenshot failed: {e}) — asking without it")
+        shot_note = f", shot {SHOT['ms']}ms" + (f" {SHOT['n_marks']} marks" if a.shot == "marks" else "") if SHOT.get("b64") else ""
+        print(f"    tree {t_tree*1000:.0f}ms ({len(items_all)} items, {len(items)} shown{shot_note}) — asking {a.model} ...", flush=True)
         signal.alarm(0)                       # 番犬は AT-SPI の詰まり用。LLM の待ち（モデルの初回読み込みで 60s を超えることがある）は urllib の timeout に任せる
         JEV_LAST.clear()
         ask = ask_claude if a.model.startswith("claude") else ask_jev if a.model.startswith("jev") else ask_ollama

@@ -90,6 +90,8 @@ run の最後に `api tokens in=… out=…` と累計トークンが出ます�
 
 `--model jev-latest` にすると、実行層が TypeSafe AI の判断専用モデル Jev になります（環境変数 `TYPESAFE_API_KEY`）。Jev は文章を書かないので、選択肢の番号を choice で選ばせ、打つ文字列はサブ目標の文中の引用符から拾います。確信度と上位の確率をログに出します。`--wait-conf 0.8`（または環境変数 `SMALLHANDS_WAIT_CONF=0.8`）を付けると、Jev が確信度 0.8 未満で WAIT を選んだときに 12 秒のタイムアウトを待たず、2 秒（`--wait-short`）で聞き直します。
 
+`--shot marks`（または環境変数 `SMALLHANDS_SHOT=marks`）を付けると、各手でスクショを撮り、選択肢の部品の矩形に一覧と同じ番号の札を描いて（Set-of-Mark）、画像対応のモデル（Ollama の gemma3 / qwen3-vl など）に一覧と一緒に渡します。答えは今までどおり番号一つ。`--shot plain` は札なしの素のスクショ。スクショは GNOME の Shift+Print を ydotool で押して撮るので、run_batch.sh が通知バナーを切ります。
+
 ## ファイル
 
 ```

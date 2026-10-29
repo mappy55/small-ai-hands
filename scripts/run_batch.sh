@@ -9,6 +9,7 @@ RUNS=${2:-3}
 PLAN=${3:-plans/plan_tokyo_station.txt}
 TAG=$(echo "$MODEL" | tr ':/' '__')
 [ -n "${SMALLHANDS_WAIT_CONF:-}" ] && TAG="${TAG}_wc${SMALLHANDS_WAIT_CONF}"   # 確信度の閾値つきの run はログを分ける
+[ -n "${SMALLHANDS_SHOT:-}" ] && [ "$SMALLHANDS_SHOT" != none ] && TAG="${TAG}_shot${SMALLHANDS_SHOT}"   # スクショつきの run もログを分ける
 PLANTAG=$(basename "$PLAN" .txt | sed 's/^plan_//')
 LOG="$ROOT/logs/${PLANTAG}_${TAG}.csv"
 OUT="$ROOT/logs/${PLANTAG}_${TAG}.out"
@@ -52,6 +53,13 @@ case "$MODEL" in
   *) echo "== warming up $MODEL ..."; bash "$ROOT/scripts/check_ollama.sh" "$MODEL" || exit 1 ;;
 esac
 
+if [ -n "${SMALLHANDS_SHOT:-}" ] && [ "$SMALLHANDS_SHOT" != none ]; then
+  # スクショは Shift+Print で撮るので、「Screenshot captured」の通知バナーが次のスクショに写り込む → run の間は切る
+  BANNERS=$(gsettings get org.gnome.desktop.notifications show-banners 2>/dev/null || echo true)
+  gsettings set org.gnome.desktop.notifications show-banners false 2>/dev/null
+  trap 'gsettings set org.gnome.desktop.notifications show-banners "$BANNERS" 2>/dev/null' EXIT
+  python3 -c "import PIL" 2>/dev/null || { echo "python3-pil がありません: sudo apt install python3-pil"; exit 1; }
+fi
 echo "== $MODEL x $RUNS  plan=$PLAN  log=$LOG" | tee -a "$OUT"
 # 計画の launch 行からアプリ名を拾い、run ごとに閉じてから始める（firefox は常に閉じる）
 # 計画の launch 行のアプリだけを run ごとに閉じる（launch 行が無い計画＝いまの画面の続きなので何も閉じない）
