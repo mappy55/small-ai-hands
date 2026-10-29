@@ -583,10 +583,31 @@ def grab_screen():
         pass
     return im
 
-def mark_screenshot(im, choices):
+def frame_offset(im, app):
+    """Wayland では AT-SPI の DESKTOP 座標が窓の左上を (0,0) として返る（窓の画面上の位置をアプリが知らない）。
+    窓を最大化してあれば、窓は画面の右下に寄っている（左にドック、上にトップバー）ので、
+    画面サイズ − 窓サイズ がそのまま窓の左上の位置になる。戻り値: (dx, dy)"""
+    if app is None:
+        return (0, 0)
+    best = None
+    try:
+        for j in range(app.childCount):
+            w = app.getChildAtIndex(j)
+            if w is not None and _showing(w):
+                r = _rect(w)
+                if r and (best is None or r[2] * r[3] > best[2] * best[3]):
+                    best = r
+    except Exception:
+        pass
+    if not best:
+        return (0, 0)
+    return (max(0, im.width - best[2]), max(0, im.height - best[3]))
+
+def mark_screenshot(im, choices, offset=(0, 0)):
     """Set-of-Mark: 選択肢の部品の矩形（AT-SPI）に一覧と同じ番号の札を描く。戻り値: 札を描けた数"""
     from PIL import ImageDraw, ImageFont
     d = ImageDraw.Draw(im)
+    dx, dy = offset
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 13)
     except Exception:
@@ -600,6 +621,7 @@ def mark_screenshot(im, choices):
         if not r or r[2] <= 0 or r[3] <= 0:
             continue
         x, y, w, h = r
+        x += dx; y += dy
         if x + w < 0 or y + h < 0 or x > im.width or y > im.height:
             continue
         label = str(i + 1)
@@ -611,12 +633,14 @@ def mark_screenshot(im, choices):
         n += 1
     return n
 
-def prepare_shot(mode, choices, max_side=1280):
+def prepare_shot(mode, choices, app=None, max_side=1280):
     """--shot のモードに応じて画像を撮り、SHOT に base64 を入れる。長辺が max_side を超えたら縮める（札は縮小前に描く）"""
     import io, base64
     t0 = time.time()
     im = grab_screen()
-    n = mark_screenshot(im, choices) if mode == "marks" else 0
+    off = frame_offset(im, app) if mode == "marks" else (0, 0)
+    n = mark_screenshot(im, choices, off) if mode == "marks" else 0
+    SHOT["offset"] = off
     if max(im.size) > max_side:
         from PIL import Image
         sc = max_side / max(im.size)
@@ -974,6 +998,9 @@ def main():
             app, t = step_launch(cmd, appname, cond)
             ok = app is not None and (not cond or condition_met(cond, list_windows(app), [], []))
             print(f"      launched in {t*1000:.0f}ms, windows: {list_windows(app) if app else '-'}  {'OK' if ok else 'NOT MET'}")
+            if a.shot != "none" and app is not None:
+                # スクショの座標合わせのために最大化（GNOME: Super+↑）。Wayland では窓の位置が取れないので、右下寄せを前提にする
+                time.sleep(0.5); ydo("key", "125:1", "103:1", "103:0", "125:0"); time.sleep(0.8)
             log.writerow([time.time(), a.model, step, gi + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, f"launch:{cmd}", 0, f"{t:.3f}", f"{time.time()-t_step0:.3f}", int(ok)]); logf.flush()
             history.append(f"sub-goal {gi+1} completed: launched {cmd}" if ok else f"sub-goal {gi+1}: launch did not reach '{cond}'")
             gi += 1; continue
@@ -1036,14 +1063,14 @@ def main():
         SHOT.update({"mode": None, "b64": None, "ms": 0, "n_marks": 0})
         if a.shot != "none":
             try:
-                png = prepare_shot(a.shot, choices)
+                png = prepare_shot(a.shot, choices, app)
                 if a.dump:
                     os.makedirs(a.dump, exist_ok=True)
                     with open(os.path.join(a.dump, f"{time.strftime('%H%M%S')}_step{step}_{a.shot}.png"), "wb") as f:
                         f.write(png)
             except Exception as e:
                 print(f"      (screenshot failed: {e}) — asking without it")
-        shot_note = f", shot {SHOT['ms']}ms" + (f" {SHOT['n_marks']} marks" if a.shot == "marks" else "") if SHOT.get("b64") else ""
+        shot_note = f", shot {SHOT['ms']}ms" + (f" {SHOT['n_marks']} marks off={SHOT.get('offset')}" if a.shot == "marks" else "") if SHOT.get("b64") else ""
         print(f"    tree {t_tree*1000:.0f}ms ({len(items_all)} items, {len(items)} shown{shot_note}) — asking {a.model} ...", flush=True)
         signal.alarm(0)                       # 番犬は AT-SPI の詰まり用。LLM の待ち（モデルの初回読み込みで 60s を超えることがある）は urllib の timeout に任せる
         JEV_LAST.clear()

@@ -34,7 +34,7 @@ for i, ch in enumerate(choices):
     except Exception:
         rw = None
     print(f"  {i+1:>2}. {ch['kind']:<7} {ch['role']:<12} {ch['name'][:30]!r:<34} desktop={r} window={rw}")
-png = L.prepare_shot("marks", choices)
+png = L.prepare_shot("marks", choices, app)
 os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
 open(out, "wb").write(png)
-print(f"tree {int((t1-t0)*1000)}ms, {len(items)} shown; shot {L.SHOT['ms']}ms, {L.SHOT['n_marks']} marks, {len(png)//1024} KB -> {out}")
+print(f"tree {int((t1-t0)*1000)}ms, {len(items)} shown; shot {L.SHOT['ms']}ms, {L.SHOT['n_marks']} marks, offset {L.SHOT.get('offset')}, {len(png)//1024} KB -> {out}")
