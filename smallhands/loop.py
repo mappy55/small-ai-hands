@@ -603,6 +603,21 @@ def frame_offset(im, app):
         return (0, 0)
     return (max(0, im.width - best[2]), max(0, im.height - best[3]))
 
+def ensure_maximized(app, tries=3):
+    """スクショの座標合わせのため、窓を最大化して右下寄せにする。Super+↑ は既に最大化されていると元に戻してしまう
+    （Firefox は前回の最大化を覚えている）ので、押す前に「画面サイズ − 窓サイズ」で状態を測り、必要なときだけ押す"""
+    for i in range(tries):
+        try:
+            im = grab_screen()
+            dx, dy = frame_offset(im, app)
+        except Exception as e:
+            print(f"      (maximize check failed: {e})"); return
+        if dx <= 90 and dy <= 50:          # ドック幅＋トップバー程度なら最大化済み
+            print(f"      window maximized (offset {dx},{dy})"); return
+        print(f"      window not maximized (offset {dx},{dy}) — pressing Super+Up")
+        ydo("key", "125:1", "103:1", "103:0", "125:0"); time.sleep(1.0)
+    print("      (could not maximize the window — marks may be misplaced)")
+
 def mark_screenshot(im, choices, offset=(0, 0)):
     """Set-of-Mark: 選択肢の部品の矩形（AT-SPI）に一覧と同じ番号の札を描く。戻り値: 札を描けた数"""
     from PIL import ImageDraw, ImageFont
@@ -639,6 +654,8 @@ def prepare_shot(mode, choices, app=None, max_side=1280):
     t0 = time.time()
     im = grab_screen()
     off = frame_offset(im, app) if mode == "marks" else (0, 0)
+    if mode == "marks" and (off[0] > 90 or off[1] > 50):
+        print(f"      (window seems not maximized: offset {off} — marks may be misplaced)")
     n = mark_screenshot(im, choices, off) if mode == "marks" else 0
     SHOT["offset"] = off
     if max(im.size) > max_side:
@@ -999,8 +1016,7 @@ def main():
             ok = app is not None and (not cond or condition_met(cond, list_windows(app), [], []))
             print(f"      launched in {t*1000:.0f}ms, windows: {list_windows(app) if app else '-'}  {'OK' if ok else 'NOT MET'}")
             if a.shot != "none" and app is not None:
-                # スクショの座標合わせのために最大化（GNOME: Super+↑）。Wayland では窓の位置が取れないので、右下寄せを前提にする
-                time.sleep(0.5); ydo("key", "125:1", "103:1", "103:0", "125:0"); time.sleep(0.8)
+                time.sleep(0.5); ensure_maximized(app)
             log.writerow([time.time(), a.model, step, gi + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, f"launch:{cmd}", 0, f"{t:.3f}", f"{time.time()-t_step0:.3f}", int(ok)]); logf.flush()
             history.append(f"sub-goal {gi+1} completed: launched {cmd}" if ok else f"sub-goal {gi+1}: launch did not reach '{cond}'")
             gi += 1; continue
