@@ -11,6 +11,7 @@ TAG=$(echo "$MODEL" | tr ':/' '__')
 [ -n "${SMALLHANDS_WAIT_CONF:-}" ] && TAG="${TAG}_wc${SMALLHANDS_WAIT_CONF}"   # 確信度の閾値つきの run はログを分ける
 [ -n "${SMALLHANDS_SHOT:-}" ] && [ "$SMALLHANDS_SHOT" != none ] && TAG="${TAG}_shot${SMALLHANDS_SHOT}"   # スクショつきの run もログを分ける
 [ -n "${NUM_CTX:-}" ] && TAG="${TAG}_ctx${NUM_CTX}"
+[ -n "${NOTHINK:-}" ] && TAG="${TAG}_nothink"
 PLANTAG=$(basename "$PLAN" .txt | sed 's/^plan_//')
 LOG="$ROOT/logs/${PLANTAG}_${TAG}.csv"
 OUT="$ROOT/logs/${PLANTAG}_${TAG}.out"
@@ -46,6 +47,7 @@ ARGS=(--dump "$ROOT/logs/prompts")
 [ -n "${MAX_LINKS:-}" ] && ARGS+=(--max-links "$MAX_LINKS")
 [ -n "${MAX_ITEMS:-}" ] && ARGS+=(--max-items "$MAX_ITEMS")
 [ -n "${NUM_CTX:-}" ] && ARGS+=(--num-ctx "$NUM_CTX")          # 例: NUM_CTX=4096（画像対応モデルが 6GB に載らないとき。check_ollama.sh も同じ値で温める）
+[ -n "${NOTHINK:-}" ] && ARGS+=(--nothink)                      # 思考つきのモデル（qwen3 系）で思考を切る。第 2 回: 考えさせると 7 倍遅い
 [ -n "${NOPRUNE:-}" ] && ARGS+=(--no-prune)
 
 # モデルを温める（初回の読み込みは 10〜60 秒かかることがあるので、計測の外でやる）。claude-* / jev-* は API なので不要

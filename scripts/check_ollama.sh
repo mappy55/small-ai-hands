@@ -16,6 +16,8 @@ ctx = int(os.environ.get("NUM_CTX", "8192"))
 body = {"model": model, "stream": False, "options": {"num_ctx": ctx, "temperature": 0},
         "format": {"type": "object", "properties": {"choice": {"type": "integer"}, "text": {"type": "string"}}, "required": ["choice", "text"]},
         "messages": [{"role": "user", "content": "Reply with JSON {\"choice\": 1, \"text\": \"ok\"}."}]}
+if os.environ.get("NOTHINK"):
+    body["think"] = False
 req = urllib.request.Request(f"{URL}/api/chat", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
 t0 = time.time()
 try:
