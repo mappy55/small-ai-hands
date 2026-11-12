@@ -138,12 +138,12 @@ def clean_tokens(tokens, min_conf):
     return "".join(kept), dropped
 
 # ---------------------------------------------------------------- 頭: ノート PC の Ollama
-def ask_llm(model, history, text):
+def ask_llm(model, history, text, timeout=120):
     msgs = [{"role": "system", "content": SYSTEM}] + history + [{"role": "user", "content": text}]
     body = {"model": model, "stream": False, "format": SCHEMA, "options": {"temperature": 0.3, "num_ctx": 4096}, "messages": msgs}
     req = urllib.request.Request(f"{OLLAMA}/api/chat", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     t0 = time.time()
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         r = json.loads(resp.read())
     wall = time.time() - t0
     content = r.get("message", {}).get("content", "")
@@ -225,12 +225,20 @@ def main():
         log.writerow(["time", "model", "speech_s", "asr_s", "llm_s", "tts_synth_s", "tts_play_s", "act_s", "heard", "dropped", "say", "action"])
     print(f"== mic {dev}  model {a.model} @ {OLLAMA}  move={'ON' if a.move else 'off (dry run)'}  min_conf={a.min_conf}")
 
-    print("   (warming up the model…)", flush=True)
+    # まず届くかを軽く確かめ、それからモデルを温める（初回の読み込みは 1〜数分かかることがあるので長めに待つ）
     try:
-        _, t_warm, _ = ask_llm(a.model, [], "こんにちは")
+        with urllib.request.urlopen(f"{OLLAMA}/api/tags", timeout=5) as resp:
+            names = [m["name"] for m in json.loads(resp.read()).get("models", [])]
+    except Exception as e:
+        sys.exit(f"Ollama に届きません（{OLLAMA}）: {e}\n  ノート PC が起きているか、Ollama が動いているか、OLLAMA_URL が合っているかを確認")
+    if a.model not in names:
+        sys.exit(f"モデル {a.model} が Ollama にありません。あるもの: {', '.join(names)}")
+    print("   (warming up the model — the first load can take a minute or more…)", flush=True)
+    try:
+        _, t_warm, _ = ask_llm(a.model, [], "こんにちは", timeout=600)
         print(f"   (model ready in {t_warm:.1f}s)")
     except Exception as e:
-        sys.exit(f"Ollama に届きません: {e}")
+        sys.exit(f"モデルの読み込みが終わりません: {e}\n  ノート PC で `ollama ps` を見て、{a.model} が読み込まれているか、GPU に載っているかを確認")
     say("準備できました。")
 
     history = []
