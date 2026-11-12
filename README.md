@@ -92,6 +92,17 @@ run の最後に `api tokens in=… out=…` と累計トークンが出ます�
 
 `--shot marks`（または環境変数 `SMALLHANDS_SHOT=marks`）を付けると、各手でスクショを撮り、選択肢の部品の矩形に一覧と同じ番号の札を描いて（Set-of-Mark）、画像対応のモデル（Ollama の gemma3 / qwen3-vl など）に一覧と一緒に渡します。答えは今までどおり番号一つ。`--shot plain` は札なしの素のスクショ。スクショは GNOME の Shift+Print を ydotool で押して撮るので、run_batch.sh が通知バナーを切ります。
 
+## PiCar-X と声で話す（picar/talk.py）
+
+Raspberry Pi 5 の PiCar-X で動かす、声の会話ループです。耳は AmiVoice API（同期 HTTP）、頭はノート PC の Ollama、口は Open JTalk、手足は picarx。信頼度の低い単語を落とすのと、動作の種類・速さ・時間の制限はコード側でやります。
+
+```bash
+export AMIVOICE_APPKEY=...                     # キーは環境変数だけ
+export OLLAMA_URL=http://<ノート PC の IP>:11434
+python3 picar/talk.py                          # 会話だけ（動作は表示のみ）
+sudo -E python3 picar/talk.py --move           # 実際に動かす（タイヤを浮かせて試す）
+```
+
 ## ファイル
 
 ```
