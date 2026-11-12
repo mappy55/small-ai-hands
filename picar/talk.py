@@ -243,6 +243,7 @@ def main():
     ap.add_argument("--thr", type=float, default=0, help="声と見なす音量のしきい値（0 で自動）")
     ap.add_argument("--wav", help="マイクの代わりにこの wav を 1 回だけ処理する（確認用）")
     ap.add_argument("--meter", action="store_true", help="音量計だけ動かす（15 秒。読み上げ → 黙る → 話す、で床と声の差を見る）")
+    ap.add_argument("--say-first", action="store_true", help="--meter の前に読み上げを 1 回鳴らす（スピーカーを使ったあとの床を見る）")
     ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--keep", default="logs/talk_wavs", help="送った音声を残すディレクトリ（'' で残さない）。棄却された声を後で調べるため")
     ap.add_argument("--log", default="logs/talk_log.csv")
@@ -259,8 +260,11 @@ def main():
         os.makedirs(a.keep, exist_ok=True)
     n_utt = 0
     if a.meter:
-        print("== 音量計: 最初に読み上げを 1 回鳴らします。そのあと 5 秒黙って、それから「右に曲がって」と話してください")
-        say("準備できました。")
+        if a.say_first:
+            print("== 音量計: 最初に読み上げを 1 回鳴らします。そのあと 5 秒黙って、それから話してください")
+            say("準備できました。")
+        else:
+            print("== 音量計: 5 秒黙って、それから話してください（読み上げは鳴らしません。--say-first で鳴らしてから測る）")
         meter(dev); return
     os.makedirs(os.path.dirname(a.log) or ".", exist_ok=True)
     new = not os.path.exists(a.log)
