@@ -55,20 +55,25 @@ def mic_device():
         pass
     return "default"
 
+FRAME = RATE // 50                       # 20 ミリ秒
+
 def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=True):
-    """声が始まるまで待ち、黙ったら録音を終える。戻り値: (wav バイト列, 声の秒数, 待った秒数, しきい値) / 声が無ければ None"""
+    """声が始まるまで待ち、黙ったら録音を終える。戻り値: (wav バイト列, 声の秒数, 待った秒数, しきい値) / 声が無ければ None
+
+    このマイクの雑音は「常に」でなく「突発的」: 静かなときの床は rms 50〜100 だが、1 秒おきに 40 ミリ秒ほどの
+    プチッ（rms 500〜1500）が入る（noise_check.py で計測）。だから音量が 1〜2 フレーム跳ねただけでは声と見なさず、
+    20 ミリ秒のフレームで「直近 240 ミリ秒のうち 160 ミリ秒以上がしきい値超え」を声の始まりとする。
+    床は直近 3 秒の下位 20% を追い続ける（読み上げの直後は残響で跳ねるので、決め打ちにしない）。"""
     p = subprocess.Popen(["arecord", "-q", "-D", dev, "-f", "S16_LE", "-r", str(RATE), "-c", "1", "-t", "raw"],
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     def read_chunk():
-        b = p.stdout.read(CHUNK * 2)
-        if len(b) < CHUNK * 2:
+        b = p.stdout.read(FRAME * 2)
+        if len(b) < FRAME * 2:
             return None
         a = array.array("h"); a.frombytes(b); return a
     try:
-        # 周りの音の大きさ（床）は一定でない: 読み上げの直後はスピーカーの残響やマイクの自動ゲインの戻りで数倍に跳ねる。
-        # 最初の 0.5 秒で決め打ちにすると、しきい値が高止まりして声を拾えなくなる。
-        # 直近 3 秒の音量の下位 20% を床として追い続け、床の 2 倍を超えたら声の始まりと見なす。
-        recent, pre, buf, started, quiet, hot = [], [], [], False, 0, 0
+        recent, pre, buf, started = [], [], [], False
+        win = []                                          # 直近 12 フレームがしきい値を超えたか
         fixed = thr
         t0 = time.time(); shown = False
         while True:
@@ -77,25 +82,27 @@ def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=T
                 break
             level = rms(c)
             if not started:
-                recent.append(level); recent = recent[-30:]
-                if len(recent) < 5:
+                recent.append(level); recent = recent[-150:]
+                if len(recent) < 25:
                     continue
                 floor = sorted(recent)[len(recent) // 5]
-                thr = fixed or max(floor * 2.0, 200)
+                thr = fixed or max(floor * 3.0, 200)
                 if verbose and not shown:
                     print(f"   (listening… floor {floor:.0f}, threshold {thr:.0f})", flush=True); shown = True
-                pre.append(c); pre = pre[-5:]                 # 声の頭（小さな子音）を落とさないよう 0.5 秒ぶん持っておく
-                hot = hot + 1 if level > thr else 0
-                if hot >= 2:
+                pre.append(c); pre = pre[-35:]            # 声の頭を落とさないよう 0.7 秒ぶん持っておく（判定に 0.24 秒使うぶん長め）
+                win.append(level > thr); win = win[-12:]
+                if sum(win) >= 8:
                     started = True; buf = list(pre); t_start = time.time()
-                    end_thr = fixed or max(floor * 1.5, 150)  # 終わりの判定は少し低めに（語尾は小さい）
+                    end_thr = fixed or max(floor * 2.0, 150)   # 終わりの判定は少し低めに（語尾は小さい）
+                    tail = []
                     LAST.update({"floor": floor, "thr": thr})
                 elif time.time() - t0 > wait_sec:
                     return None
             else:
                 buf.append(c)
-                quiet = quiet + 1 if level < end_thr else 0
-                if quiet >= int(end_silence * 10) or len(buf) >= int(max_sec * 10):
+                tail.append(level > end_thr); tail = tail[-int(end_silence * 50):]
+                # 黙った = 直近 0.8 秒のうち、しきい値超えが 1 割以下（プチッの 2〜3 フレームは許す）
+                if (len(tail) >= int(end_silence * 50) and sum(tail) <= len(tail) // 10) or len(buf) >= int(max_sec * 50):
                     break
         if not started:
             return None
