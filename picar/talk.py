@@ -23,6 +23,8 @@ OLLAMA = os.environ.get("OLLAMA_URL", "http://192.168.0.21:11434")
 RATE = 16000
 CHUNK = RATE // 10                       # 0.1 秒
 ACTIONS = ["forward", "backward", "left", "right", "stop", "none"]
+GAIN_TARGET = 0.7                        # 送る前にピークをここまで増幅する（0 で増幅しない）
+LAST = {"peak": 0.0, "gain": 1.0}        # 直近の録音のピークと増幅率（表示用）
 
 SYSTEM = (
     "あなたは小さな車型ロボット「ピカ」です。持ち主が声で話しかけてきます。音声認識の結果なので、多少の誤字や言い直しが混ざります。"
@@ -71,7 +73,7 @@ def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=T
                 return None
             noise.append(rms(c))
         floor = sorted(noise)[len(noise) // 2]
-        thr = thr or max(floor * 1.8, 400)
+        thr = thr or max(floor * 2.5, 250)
         if verbose:
             print(f"   (listening… noise {floor:.0f}, threshold {thr:.0f})", flush=True)
         pre, buf, started, quiet, hot = [], [], False, 0, 0
@@ -82,7 +84,7 @@ def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=T
                 break
             level = rms(c)
             if not started:
-                pre.append(c); pre = pre[-3:]                 # 声の頭を落とさないよう 0.3 秒ぶん持っておく
+                pre.append(c); pre = pre[-5:]                 # 声の頭（小さな子音）を落とさないよう 0.5 秒ぶん持っておく
                 hot = hot + 1 if level > thr else 0
                 if hot >= 2:
                     started = True; buf = list(pre); t_start = time.time()
@@ -99,6 +101,13 @@ def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=T
         samples = array.array("h")
         for c in buf:
             samples.extend(c)
+        # この USB マイクは最大ゲインでもピークが 6〜9% しか出ない。小さいまま送ると AmiVoice が信頼度不足で棄却するので、
+        # ピークが 70% になるよう増幅してから送る（上限 16 倍。ノイズも一緒に持ち上がる）
+        peak = max(1, max(abs(x) for x in samples))
+        gain = min(16.0, GAIN_TARGET * 32767 / peak) if GAIN_TARGET else 1.0
+        if gain > 1.05:
+            samples = array.array("h", (max(-32768, min(32767, int(x * gain))) for x in samples))
+        LAST.update({"peak": peak / 32768, "gain": gain})
         bio = io.BytesIO()
         with wave.open(bio, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(RATE); w.writeframes(samples.tobytes())
@@ -125,10 +134,14 @@ def amivoice(wav_bytes, engine="-a-general"):
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"AmiVoice API {e.code}: {e.read().decode('utf-8', 'replace')[:200]}")
     wall = time.time() - t0
+    if r.get("code") == "o":                 # 信頼度がしきい値未満で棄却（声が小さい・雑音・途中で切れた）
+        return None, [], wall, ""
     if r.get("code"):
         raise RuntimeError(f"AmiVoice: {r.get('code')} {r.get('message')}")
-    tokens = [(t.get("written", ""), float(t.get("confidence", 0))) for res in r.get("results", []) for t in res.get("tokens", [])]
-    return r.get("text", ""), tokens, wall
+    toks = [t for res in r.get("results", []) for t in res.get("tokens", [])]
+    tokens = [(t.get("written", ""), float(t.get("confidence", 0))) for t in toks]
+    spoken = "".join(t.get("spoken", "") for t in toks)
+    return r.get("text", ""), tokens, wall, spoken
 
 # ---------------------------------------------------------------- 判定: 信頼度の低い単語を落とす
 def clean_tokens(tokens, min_conf):
@@ -168,7 +181,9 @@ def say(text, wav="/tmp/say.wav"):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     t1 = time.time()
     subprocess.run(["aplay", "-q", wav], check=False, timeout=60)
-    return t1 - t0, time.time() - t1
+    t2 = time.time()
+    time.sleep(0.4)                          # スピーカーの残響が消えるのを待ってから聞き始める
+    return t1 - t0, t2 - t1
 
 # ---------------------------------------------------------------- 手足: picarx
 class Car:
@@ -210,14 +225,21 @@ def main():
     ap.add_argument("--min-conf", type=float, default=0.6, help="この信頼度未満の単語は落とす")
     ap.add_argument("--thr", type=float, default=0, help="声と見なす音量のしきい値（0 で自動）")
     ap.add_argument("--wav", help="マイクの代わりにこの wav を 1 回だけ処理する（確認用）")
+    ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
+    ap.add_argument("--keep", default="logs/talk_wavs", help="送った音声を残すディレクトリ（'' で残さない）。棄却された声を後で調べるため")
     ap.add_argument("--log", default="logs/talk_log.csv")
     a = ap.parse_args()
 
     for tool in ("arecord", "aplay", "open_jtalk"):
         if not shutil.which(tool):
             sys.exit(f"{tool} が見つかりません")
+    global GAIN_TARGET
+    GAIN_TARGET = a.gain
     dev = mic_device()
     car = Car(a.move, a.speed, a.seconds)
+    if a.keep:
+        os.makedirs(a.keep, exist_ok=True)
+    n_utt = 0
     os.makedirs(os.path.dirname(a.log) or ".", exist_ok=True)
     new = not os.path.exists(a.log)
     logf = open(a.log, "a", newline="", encoding="utf-8"); log = csv.writer(logf)
@@ -251,12 +273,23 @@ def main():
                 if got is None:
                     continue
                 wav_bytes, speech, _, _ = got
+            n_utt += 1
+            if a.keep and not a.wav:
+                with open(os.path.join(a.keep, f"{time.strftime('%H%M%S')}_{n_utt:03d}.wav"), "wb") as f:
+                    f.write(wav_bytes)
             try:
-                text, tokens, t_asr = amivoice(wav_bytes)
+                text, tokens, t_asr, spoken = amivoice(wav_bytes)
             except Exception as e:
                 print(f"   !! {e}"); time.sleep(1); continue
+            lvl = f"speech {speech:.1f}s, peak {LAST['peak']*100:.0f}% x{LAST['gain']:.1f}"
+            if text is None:
+                print(f"[heard] (rejected by AmiVoice: confidence too low)  asr {t_asr:.2f}s ({lvl})")
+                log.writerow([time.time(), a.model, f"{speech:.2f}", f"{t_asr:.3f}", 0, 0, 0, 0, "(rejected)", "", "", ""]); logf.flush()
+                if a.wav:
+                    break
+                continue
             heard, dropped = clean_tokens(tokens, a.min_conf)
-            print(f"[heard] {text!r}  asr {t_asr:.2f}s (speech {speech:.1f}s)"
+            print(f"[heard] {text!r}  asr {t_asr:.2f}s ({lvl})"
                   + (f"  dropped {[(w, round(c, 2)) for w, c in dropped]} -> {heard!r}" if dropped else ""))
             if not heard.strip():
                 if tokens:                                   # 何か聞こえたが全部あやしい → 動かずに聞き返す
@@ -264,7 +297,8 @@ def main():
                 if a.wav:
                     break
                 continue
-            if any(k in heard for k in ("おしまい", "終わり", "さようなら")):
+            # 終了の合図は表記でなく読みで見る（「おしまい」が「姉妹」と書かれて返ることがある）
+            if any(k in heard for k in ("おしまい", "終わり", "さようなら")) or any(k in spoken for k in ("おしまい", "しまい", "おわり", "さようなら")):
                 say("はい、おしまいにします。"); break
             ans, t_llm, _ = ask_llm(a.model, history[-6:], heard)
             print(f"[think] llm {t_llm:.2f}s -> say {ans['say']!r}  action {ans['action']}")
