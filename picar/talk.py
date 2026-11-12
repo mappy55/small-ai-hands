@@ -24,7 +24,8 @@ RATE = 16000
 CHUNK = RATE // 10                       # 0.1 秒
 ACTIONS = ["forward", "backward", "left", "right", "stop", "none"]
 GAIN_TARGET = 0.7                        # 送る前にピークをここまで増幅する（0 で増幅しない）
-LEAD_SILENCE = 0.3                       # 読み上げの先頭に足す無音（秒）
+LEAD_SILENCE = 0.5                       # 読み上げの先頭に足す助走（秒）
+LEAD_LEVEL = 12                          # 助走の雑音の大きさ（16 ビットで ±12 ＝ 約 -69dB。0 だと完全な無音）
 LAST = {"peak": 0.0, "gain": 1.0}        # 直近の録音のピークと増幅率（表示用）
 
 SYSTEM = (
@@ -205,11 +206,18 @@ def say(text, wav="/tmp/say.wav"):
     t0 = time.time()
     subprocess.run(["open_jtalk", "-x", DIC, "-m", VOICE, "-ow", wav], input=text.encode(), check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-    # I2S のアンプは無音のあと立ち上がりに少しかかり、文の頭が切れる → 先頭に無音を足してから鳴らす
+    # 文の頭が切れる対策。Robot HAT の DAC（PCM5102A 系）は、データが完全な 0 の間は自分で消音し、
+    # 音が来てから消音を解くのに少しかかる。だから先頭に足すのは「無音（0）」ではだめで、
+    # 聞こえないほど小さな雑音（±LEAD_LEVEL）を足して、文が始まる前に DAC を起こしておく。
     if LEAD_SILENCE > 0:
+        import random
         with wave.open(wav, "rb") as w:
             params = w.getparams(); frames = w.readframes(w.getnframes())
-        pad = b"\x00" * (int(params.framerate * LEAD_SILENCE) * params.sampwidth * params.nchannels)
+        n = int(params.framerate * LEAD_SILENCE) * params.nchannels
+        if params.sampwidth == 2 and LEAD_LEVEL > 0:
+            pad = array.array("h", (random.randint(-LEAD_LEVEL, LEAD_LEVEL) for _ in range(n))).tobytes()
+        else:
+            pad = b"\x00" * (n * params.sampwidth)
         with wave.open(wav, "wb") as w:
             w.setparams(params); w.writeframes(pad + frames)
     t1 = time.time()
@@ -261,7 +269,9 @@ def main():
     ap.add_argument("--meter", action="store_true", help="音量計だけ動かす（15 秒。読み上げ → 黙る → 話す、で床と声の差を見る）")
     ap.add_argument("--say-first", action="store_true", help="--meter の前に読み上げを 1 回鳴らす（スピーカーを使ったあとの床を見る）")
     ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
-    ap.add_argument("--lead", type=float, default=0.3, help="読み上げの先頭に足す無音の秒数（頭が切れるとき増やす）")
+    ap.add_argument("--lead", type=float, default=0.5, help="読み上げの先頭に足す助走の秒数（頭が切れるとき増やす）")
+    ap.add_argument("--lead-level", type=int, default=12, help="助走の雑音の大きさ（0 で完全な無音。DAC が無音で消音するので小さな雑音にしている）")
+    ap.add_argument("--history", type=int, default=0, help="モデルに見せる過去のやりとりの数（往復）。0 だと毎回その一言だけで判断する")
     ap.add_argument("--keep", default="logs/talk_wavs", help="送った音声を残すディレクトリ（'' で残さない）。棄却された声を後で調べるため")
     ap.add_argument("--log", default="logs/talk_log.csv")
     a = ap.parse_args()
@@ -269,9 +279,10 @@ def main():
     for tool in ("arecord", "aplay", "open_jtalk"):
         if not shutil.which(tool):
             sys.exit(f"{tool} が見つかりません")
-    global GAIN_TARGET, LEAD_SILENCE
+    global GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL
     GAIN_TARGET = a.gain
     LEAD_SILENCE = a.lead
+    LEAD_LEVEL = a.lead_level
     dev = mic_device()
     car = Car(a.move, a.speed, a.seconds)
     if a.keep:
@@ -344,7 +355,9 @@ def main():
             # 終了の合図は表記でなく読みで見る（「おしまい」が「姉妹」と書かれて返ることがある）
             if any(k in heard for k in ("おしまい", "終わり", "さようなら")) or any(k in spoken for k in ("おしまい", "しまい", "おわり", "さようなら")):
                 say("はい、おしまいにします。"); break
-            ans, t_llm, _ = ask_llm(a.model, history[-6:], heard)
+            # 過去のやりとりを見せると、gemma3:4b は同じ命令に「もう曲がりました」と答えて動作を選ばないことがある
+            # （指示に書き足しても 3 回に 1 回起きた）。命令はその一言だけで判断させるのを既定にする
+            ans, t_llm, _ = ask_llm(a.model, history[-2 * a.history:] if a.history > 0 else [], heard)
             print(f"[think] llm {t_llm:.2f}s -> say {ans['say']!r}  action {ans['action']}")
             t_syn, t_play = say(ans["say"])
             t_act = car.act(ans["action"])
