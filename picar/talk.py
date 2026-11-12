@@ -65,34 +65,36 @@ def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=T
             return None
         a = array.array("h"); a.frombytes(b); return a
     try:
-        # 最初の 0.5 秒で周りの音の大きさを測り、しきい値を決める（自動ゲインでノイズが常に乗っているため）
-        noise = []
-        for _ in range(5):
-            c = read_chunk()
-            if c is None:
-                return None
-            noise.append(rms(c))
-        floor = sorted(noise)[len(noise) // 2]
-        thr = thr or max(floor * 2.5, 250)
-        if verbose:
-            print(f"   (listening… noise {floor:.0f}, threshold {thr:.0f})", flush=True)
-        pre, buf, started, quiet, hot = [], [], False, 0, 0
-        t0 = time.time()
+        # 周りの音の大きさ（床）は一定でない: 読み上げの直後はスピーカーの残響やマイクの自動ゲインの戻りで数倍に跳ねる。
+        # 最初の 0.5 秒で決め打ちにすると、しきい値が高止まりして声を拾えなくなる。
+        # 直近 3 秒の音量の下位 20% を床として追い続け、床の 2 倍を超えたら声の始まりと見なす。
+        recent, pre, buf, started, quiet, hot = [], [], [], False, 0, 0
+        fixed = thr
+        t0 = time.time(); shown = False
         while True:
             c = read_chunk()
             if c is None:
                 break
             level = rms(c)
             if not started:
+                recent.append(level); recent = recent[-30:]
+                if len(recent) < 5:
+                    continue
+                floor = sorted(recent)[len(recent) // 5]
+                thr = fixed or max(floor * 2.0, 200)
+                if verbose and not shown:
+                    print(f"   (listening… floor {floor:.0f}, threshold {thr:.0f})", flush=True); shown = True
                 pre.append(c); pre = pre[-5:]                 # 声の頭（小さな子音）を落とさないよう 0.5 秒ぶん持っておく
                 hot = hot + 1 if level > thr else 0
                 if hot >= 2:
                     started = True; buf = list(pre); t_start = time.time()
+                    end_thr = fixed or max(floor * 1.5, 150)  # 終わりの判定は少し低めに（語尾は小さい）
+                    LAST.update({"floor": floor, "thr": thr})
                 elif time.time() - t0 > wait_sec:
                     return None
             else:
                 buf.append(c)
-                quiet = quiet + 1 if level < thr else 0
+                quiet = quiet + 1 if level < end_thr else 0
                 if quiet >= int(end_silence * 10) or len(buf) >= int(max_sec * 10):
                     break
         if not started:
@@ -112,6 +114,21 @@ def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=T
         with wave.open(bio, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(RATE); w.writeframes(samples.tobytes())
         return bio.getvalue(), len(samples) / RATE, waited, thr
+    finally:
+        p.kill(); p.wait()
+
+def meter(dev, seconds=15):
+    """音量計: 0.5 秒ごとの音量を表示する。黙っているときと話しているときの差を見るため"""
+    p = subprocess.Popen(["arecord", "-q", "-D", dev, "-f", "S16_LE", "-r", str(RATE), "-c", "1", "-t", "raw"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        for i in range(seconds * 2):
+            b = p.stdout.read(RATE)                         # 0.5 秒
+            if len(b) < RATE:
+                break
+            a = array.array("h"); a.frombytes(b)
+            lv = rms(a); pk = max(abs(x) for x in a)
+            print(f"   {i*0.5:5.1f}s  rms {lv:6.0f}  peak {pk:6d}  {'#' * min(60, int(lv / 20))}", flush=True)
     finally:
         p.kill(); p.wait()
 
@@ -225,6 +242,7 @@ def main():
     ap.add_argument("--min-conf", type=float, default=0.6, help="この信頼度未満の単語は落とす")
     ap.add_argument("--thr", type=float, default=0, help="声と見なす音量のしきい値（0 で自動）")
     ap.add_argument("--wav", help="マイクの代わりにこの wav を 1 回だけ処理する（確認用）")
+    ap.add_argument("--meter", action="store_true", help="音量計だけ動かす（15 秒。読み上げ → 黙る → 話す、で床と声の差を見る）")
     ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--keep", default="logs/talk_wavs", help="送った音声を残すディレクトリ（'' で残さない）。棄却された声を後で調べるため")
     ap.add_argument("--log", default="logs/talk_log.csv")
@@ -240,6 +258,10 @@ def main():
     if a.keep:
         os.makedirs(a.keep, exist_ok=True)
     n_utt = 0
+    if a.meter:
+        print("== 音量計: 最初に読み上げを 1 回鳴らします。そのあと 5 秒黙って、それから「右に曲がって」と話してください")
+        say("準備できました。")
+        meter(dev); return
     os.makedirs(os.path.dirname(a.log) or ".", exist_ok=True)
     new = not os.path.exists(a.log)
     logf = open(a.log, "a", newline="", encoding="utf-8"); log = csv.writer(logf)
@@ -281,7 +303,7 @@ def main():
                 text, tokens, t_asr, spoken = amivoice(wav_bytes)
             except Exception as e:
                 print(f"   !! {e}"); time.sleep(1); continue
-            lvl = f"speech {speech:.1f}s, peak {LAST['peak']*100:.0f}% x{LAST['gain']:.1f}"
+            lvl = f"speech {speech:.1f}s, peak {LAST['peak']*100:.0f}% x{LAST['gain']:.1f}, floor {LAST.get('floor', 0):.0f}"
             if text is None:
                 print(f"[heard] (rejected by AmiVoice: confidence too low)  asr {t_asr:.2f}s ({lvl})")
                 log.writerow([time.time(), a.model, f"{speech:.2f}", f"{t_asr:.3f}", 0, 0, 0, 0, "(rejected)", "", "", ""]); logf.flush()
