@@ -24,6 +24,7 @@ RATE = 16000
 CHUNK = RATE // 10                       # 0.1 秒
 ACTIONS = ["forward", "backward", "left", "right", "stop", "none"]
 GAIN_TARGET = 0.7                        # 送る前にピークをここまで増幅する（0 で増幅しない）
+LEAD_SILENCE = 0.3                       # 読み上げの先頭に足す無音（秒）
 LAST = {"peak": 0.0, "gain": 1.0}        # 直近の録音のピークと増幅率（表示用）
 
 SYSTEM = (
@@ -31,6 +32,7 @@ SYSTEM = (
     "返事は日本語で、話し言葉で、1〜2 文で短く。記号や絵文字は使わない（読み上げるため）。"
     "体を動かす必要があるときだけ action を選ぶ: forward（前へ）, backward（後ろへ）, left（左へ曲がりながら前へ）, right（右へ曲がりながら前へ）, stop（止まる）。"
     "動く必要がなければ none。1 回の返事で動作は一つだけ。"
+    "動けと言われたら、そのたびに必ず action を選ぶ。同じ命令を続けて言われても、前に動いたからといって none にしない（体はあなたの返事の action でしか動かない）。"
     'JSON だけで答える: {"say": "<読み上げる文>", "action": "<上のどれか>"}'
 )
 SCHEMA = {"type": "object",
@@ -203,6 +205,13 @@ def say(text, wav="/tmp/say.wav"):
     t0 = time.time()
     subprocess.run(["open_jtalk", "-x", DIC, "-m", VOICE, "-ow", wav], input=text.encode(), check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    # I2S のアンプは無音のあと立ち上がりに少しかかり、文の頭が切れる → 先頭に無音を足してから鳴らす
+    if LEAD_SILENCE > 0:
+        with wave.open(wav, "rb") as w:
+            params = w.getparams(); frames = w.readframes(w.getnframes())
+        pad = b"\x00" * (int(params.framerate * LEAD_SILENCE) * params.sampwidth * params.nchannels)
+        with wave.open(wav, "wb") as w:
+            w.setparams(params); w.writeframes(pad + frames)
     t1 = time.time()
     subprocess.run(["aplay", "-q", wav], check=False, timeout=60)
     t2 = time.time()
@@ -252,6 +261,7 @@ def main():
     ap.add_argument("--meter", action="store_true", help="音量計だけ動かす（15 秒。読み上げ → 黙る → 話す、で床と声の差を見る）")
     ap.add_argument("--say-first", action="store_true", help="--meter の前に読み上げを 1 回鳴らす（スピーカーを使ったあとの床を見る）")
     ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
+    ap.add_argument("--lead", type=float, default=0.3, help="読み上げの先頭に足す無音の秒数（頭が切れるとき増やす）")
     ap.add_argument("--keep", default="logs/talk_wavs", help="送った音声を残すディレクトリ（'' で残さない）。棄却された声を後で調べるため")
     ap.add_argument("--log", default="logs/talk_log.csv")
     a = ap.parse_args()
@@ -259,8 +269,9 @@ def main():
     for tool in ("arecord", "aplay", "open_jtalk"):
         if not shutil.which(tool):
             sys.exit(f"{tool} が見つかりません")
-    global GAIN_TARGET
+    global GAIN_TARGET, LEAD_SILENCE
     GAIN_TARGET = a.gain
+    LEAD_SILENCE = a.lead
     dev = mic_device()
     car = Car(a.move, a.speed, a.seconds)
     if a.keep:
@@ -337,7 +348,7 @@ def main():
             print(f"[think] llm {t_llm:.2f}s -> say {ans['say']!r}  action {ans['action']}")
             t_syn, t_play = say(ans["say"])
             t_act = car.act(ans["action"])
-            print(f"[done]  tts synth {t_syn:.2f}s play {t_play:.2f}s | act {t_act:.2f}s | 声の終わりから返事の出だしまで {t_asr + t_llm + t_syn:.2f}s")
+            print(f"[done]  tts synth {t_syn:.2f}s play {t_play:.2f}s | act {t_act:.2f}s | 声の終わりから返事の出だしまで {t_asr + t_llm + t_syn + LEAD_SILENCE:.2f}s")
             log.writerow([time.time(), a.model, f"{speech:.2f}", f"{t_asr:.3f}", f"{t_llm:.3f}", f"{t_syn:.3f}", f"{t_play:.3f}", f"{t_act:.3f}",
                           heard, json.dumps(dropped, ensure_ascii=False), ans["say"], ans["action"]]); logf.flush()
             history += [{"role": "user", "content": heard}, {"role": "assistant", "content": json.dumps(ans, ensure_ascii=False)}]
