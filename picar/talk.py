@@ -16,7 +16,7 @@ talk.py — PiCar-X と声で話す最小のループ（Raspberry Pi 側で動�
 
 標準ライブラリだけで動く。段ごとの秒数を表示し、logs/talk_log.csv に残す。
 """
-import os, sys, io, json, time, wave, array, argparse, subprocess, urllib.request, urllib.error, csv, uuid, shutil
+import os, sys, io, json, time, wave, array, argparse, subprocess, urllib.request, urllib.error, csv, uuid, shutil, tempfile
 
 AMIVOICE_URL = "https://acp-api.amivoice.com/v1/nolog/recognize"    # ログ保存なし（家の中の声を送るので）
 OLLAMA = os.environ.get("OLLAMA_URL", "http://192.168.0.21:11434")
@@ -199,10 +199,12 @@ def ask_llm(model, history, text, timeout=120):
 DIC = "/var/lib/mecab/dic/open-jtalk/naist-jdic"
 VOICE = "/usr/share/hts-voice/nitech-jp-atr503-m001/nitech_jp_atr503_m001.htsvoice"
 
-def say(text, wav="/tmp/say.wav"):
+def say(text, wav=None):
     """読み上げる。戻り値: (合成の秒数, 再生の秒数)"""
     if not text.strip():
         return 0.0, 0.0
+    # 一時ファイルは利用者ごとに分ける（sudo で一度動かすと root の /tmp/say.wav が残り、通常ユーザーで上書きできなくなる）
+    wav = wav or os.path.join(tempfile.gettempdir(), f"smallhands_say_{os.getuid()}.wav")
     t0 = time.time()
     subprocess.run(["open_jtalk", "-x", DIC, "-m", VOICE, "-ow", wav], input=text.encode(), check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
