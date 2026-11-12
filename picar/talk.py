@@ -34,11 +34,18 @@ SYSTEM = (
     "体を動かす必要があるときだけ action を選ぶ: forward（前へ）, backward（後ろへ）, left（左へ曲がりながら前へ）, right（右へ曲がりながら前へ）, stop（止まる）。"
     "動く必要がなければ none。1 回の返事で動作は一つだけ。"
     "動けと言われたら、そのたびに必ず action を選ぶ。同じ命令を続けて言われても、前に動いたからといって none にしない（体はあなたの返事の action でしか動かない）。"
-    'JSON だけで答える: {"say": "<読み上げる文>", "action": "<上のどれか>"}'
+    "あいさつ、質問、雑談のように、動けと言われていないときは必ず none。迷ったら none。"
+    "先に action を決めてから、それに合う say を書く。"
+    'JSON だけで答える: {"action": "<上のどれか>", "say": "<読み上げる文>"}\n'
+    '例: 「前に進んで」→ {"action": "forward", "say": "はい、前に進みます。"}\n'
+    '例: 「こんにちは」→ {"action": "none", "say": "こんにちは。"}\n'
+    '例: 「名前は何ていうの」→ {"action": "none", "say": "ピカです。"}\n'
+    '例: 「止まって」→ {"action": "stop", "say": "はい、止まります。"}'
 )
+# action を先に書かせる（返事の文に引っ張られて動作を選ぶのを避ける）
 SCHEMA = {"type": "object",
-          "properties": {"say": {"type": "string"}, "action": {"type": "string", "enum": ACTIONS}},
-          "required": ["say", "action"]}
+          "properties": {"action": {"type": "string", "enum": ACTIONS}, "say": {"type": "string"}},
+          "required": ["action", "say"]}
 
 # ---------------------------------------------------------------- 耳: 録音（声が始まってから、黙るまで）
 def rms(samples):
@@ -180,7 +187,7 @@ def clean_tokens(tokens, min_conf):
 # ---------------------------------------------------------------- 頭: ノート PC の Ollama
 def ask_llm(model, history, text, timeout=120):
     msgs = [{"role": "system", "content": SYSTEM}] + history + [{"role": "user", "content": text}]
-    body = {"model": model, "stream": False, "format": SCHEMA, "options": {"temperature": 0.3, "num_ctx": 4096}, "messages": msgs}
+    body = {"model": model, "stream": False, "format": SCHEMA, "options": {"temperature": 0, "num_ctx": 4096}, "messages": msgs}
     req = urllib.request.Request(f"{OLLAMA}/api/chat", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     t0 = time.time()
     with urllib.request.urlopen(req, timeout=timeout) as resp:
