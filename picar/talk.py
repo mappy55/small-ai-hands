@@ -25,8 +25,10 @@ RATE = 16000
 CHUNK = RATE // 10                       # 0.1 秒
 ACTIONS = ["forward", "backward", "left", "right", "stop", "none"]
 GAIN_TARGET = 0.7                        # 送る前にピークをここまで増幅する（0 で増幅しない）
-LEAD_SILENCE = 0.5                       # 読み上げの先頭に足す助走（秒）
-LEAD_LEVEL = 12                          # 助走の雑音の大きさ（16 ビットで ±12 ＝ 約 -69dB。0 だと完全な無音）
+CHIME = 0.15                             # 読み上げの前の合図音（ピッ）の長さ（秒）。0 で鳴らさない
+CHIME_LEVEL = 5000                       # 合図音の大きさ（16 ビットで ±5000 ＝ 約 -16dB）
+LEAD_SILENCE = 0.25                      # 合図音と文の間（秒）
+LEAD_LEVEL = 100                         # その間をつなぐ雑音の大きさ（±100 ＝ 約 -50dB。0 だと完全な無音）
 LAST = {"peak": 0.0, "gain": 1.0}        # 直近の録音のピークと増幅率（表示用）
 BILLED = {"s": 0.0}                      # AmiVoice が声として数えた秒数の累計（概算）
 
@@ -79,7 +81,7 @@ def _read_frame(p):
         return None
     a = array.array("h"); a.frombytes(b); return a
 
-def _gate(p, fixed, wait_sec, verbose):
+def _gate(p, fixed, wait_sec, verbose, factor=3.0, floor_min=200, need=8):
     """門番: 音がするまで待つ。戻り値: (取り置きのフレーム, 床, しきい値) / 時間切れやマイク切断は None
 
     このマイクの雑音は「常に」でなく「突発的」: 静かなときの床は rms 50〜100 だが、40 ミリ秒ほどのプチッ（rms 500〜1500）が入る。
@@ -97,11 +99,11 @@ def _gate(p, fixed, wait_sec, verbose):
         if len(recent) < 25:
             continue
         floor = sorted(recent)[len(recent) // 5]
-        thr = fixed or max(floor * 3.0, 200)
+        thr = fixed or max(floor * factor, floor_min)
         if verbose and not shown:
             print(f"   (listening… floor {floor:.0f}, threshold {thr:.0f})", flush=True); shown = True
         win.append(level > thr); win = win[-12:]
-        if sum(win) >= 8:
+        if sum(win) >= need:
             return pre, floor, thr
         if time.time() - t0 > wait_sec:
             return None
@@ -163,7 +165,9 @@ def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, n
     key = os.environ.get("AMIVOICE_APPKEY") or sys.exit("AMIVOICE_APPKEY が設定されていません")
     p = _open_mic(dev); ws = None
     try:
-        g = _gate(p, thr, wait_sec, verbose)
+        # ストリーミングでは門番をゆるくする: 声かどうかは AmiVoice が決め、声でなければ課金もされない。
+        # 厳しい門番（床の 3 倍・160ms）だと「バックして」のような短く小さい発話で開かなかった
+        g = _gate(p, thr, wait_sec, verbose, factor=2.2, floor_min=150, need=5)
         if g is None:
             return None
         pre, floor, thr_now = g
@@ -340,20 +344,24 @@ def say(text, wav=None):
     t0 = time.time()
     subprocess.run(["open_jtalk", "-x", DIC, "-m", VOICE, "-ow", wav], input=text.encode(), check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-    # 文の頭が切れる対策。Robot HAT の DAC（PCM5102A 系）は、データが完全な 0 の間は自分で消音し、
-    # 音が来てから消音を解くのに少しかかる。だから先頭に足すのは「無音（0）」ではだめで、
-    # 聞こえないほど小さな雑音（±LEAD_LEVEL）を足して、文が始まる前に DAC を起こしておく。
-    if LEAD_SILENCE > 0:
-        import random
+    # 文の頭が切れる対策。先頭に完全な無音（0）を足しても、聞こえないほど小さな雑音（±12）を足しても、最初の一音が欠けた。
+    # アンプは「ある程度の大きさの音」が来てから立ち上がるらしいので、文の前に短い合図音（ピッ）を鳴らして起こしておく。
+    # 合図音の頭が欠けても困らないし、「これから話す」の合図にもなる。そのあと小さな雑音でつないで、文に入る。
+    if LEAD_SILENCE > 0 or CHIME > 0:
+        import random, math
         with wave.open(wav, "rb") as w:
             params = w.getparams(); frames = w.readframes(w.getnframes())
-        n = int(params.framerate * LEAD_SILENCE) * params.nchannels
-        if params.sampwidth == 2 and LEAD_LEVEL > 0:
-            pad = array.array("h", (random.randint(-LEAD_LEVEL, LEAD_LEVEL) for _ in range(n))).tobytes()
-        else:
-            pad = b"\x00" * (n * params.sampwidth)
-        with wave.open(wav, "wb") as w:
-            w.setparams(params); w.writeframes(pad + frames)
+        if params.sampwidth == 2:
+            sr, ch = params.framerate, params.nchannels
+            lead = array.array("h")
+            n_chime = int(sr * CHIME)
+            for k in range(n_chime):
+                env = min(1.0, k / (sr * 0.01), (n_chime - k) / (sr * 0.03))        # 立ち上がり 10ms、減衰 30ms
+                v = int(CHIME_LEVEL * env * math.sin(2 * math.pi * 880 * k / sr))
+                lead.extend([v] * ch)
+            lead.extend(random.randint(-LEAD_LEVEL, LEAD_LEVEL) if LEAD_LEVEL > 0 else 0 for _ in range(int(sr * LEAD_SILENCE) * ch))
+            with wave.open(wav, "wb") as w:
+                w.setparams(params); w.writeframes(lead.tobytes() + frames)
     t1 = time.time()
     subprocess.run(["aplay", "-q", wav], check=False, timeout=60)
     t2 = time.time()
@@ -406,8 +414,9 @@ def main():
     ap.add_argument("--meter", action="store_true", help="音量計だけ動かす（15 秒。読み上げ → 黙る → 話す、で床と声の差を見る）")
     ap.add_argument("--say-first", action="store_true", help="--meter の前に読み上げを 1 回鳴らす（スピーカーを使ったあとの床を見る）")
     ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
-    ap.add_argument("--lead", type=float, default=0.5, help="読み上げの先頭に足す助走の秒数（頭が切れるとき増やす）")
-    ap.add_argument("--lead-level", type=int, default=12, help="助走の雑音の大きさ（0 で完全な無音。DAC が無音で消音するので小さな雑音にしている）")
+    ap.add_argument("--chime", type=float, default=0.15, help="読み上げの前に鳴らす合図音の秒数（アンプを起こして文の頭が切れるのを防ぐ。0 で鳴らさない）")
+    ap.add_argument("--lead", type=float, default=0.25, help="合図音と文の間の秒数")
+    ap.add_argument("--lead-level", type=int, default=100, help="その間をつなぐ雑音の大きさ（0 で完全な無音）")
     ap.add_argument("--history", type=int, default=0, help="モデルに見せる過去のやりとりの数（往復）。0 だと毎回その一言だけで判断する")
     ap.add_argument("--keep", default="logs/talk_wavs", help="送った音声を残すディレクトリ（'' で残さない）。棄却された声を後で調べるため")
     ap.add_argument("--log", default="logs/talk_log2.csv")
@@ -416,10 +425,11 @@ def main():
     for tool in ("arecord", "aplay", "open_jtalk"):
         if not shutil.which(tool):
             sys.exit(f"{tool} が見つかりません")
-    global GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL
+    global GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME
     GAIN_TARGET = a.gain
     LEAD_SILENCE = a.lead
     LEAD_LEVEL = a.lead_level
+    CHIME = a.chime
     dev = mic_device()
     car = Car(a.move, a.speed, a.seconds)
     if a.keep:
@@ -524,7 +534,7 @@ def main():
                     break
                 continue
             # 終了の合図は表記でなく読みで見る（「おしまい」が「姉妹」と書かれて返ることがある）
-            if any(k in heard for k in ("おしまい", "終わり", "さようなら")) or any(k in spoken for k in ("おしまい", "しまい", "おわり", "さようなら")):
+            if any(k in heard for k in ("おしまい", "終わり", "さようなら", "バイバイ")) or any(k in spoken for k in ("おしまい", "しまい", "おわり", "さようなら", "ばいばい")):
                 say("はい、おしまいにします。"); break
             # 過去のやりとりを見せると、gemma3:4b は同じ命令に「もう曲がりました」と答えて動作を選ばないことがある
             # （指示に書き足しても 3 回に 1 回起きた）。命令はその一言だけで判断させるのを既定にする
@@ -532,7 +542,7 @@ def main():
             print(f"[think] llm {t_llm:.2f}s -> say {ans['say']!r}  action {ans['action']}")
             t_syn, t_play = say(ans["say"])
             t_act = car.act(ans["action"])
-            print(f"[done]  tts synth {t_syn:.2f}s play {t_play:.2f}s | act {t_act:.2f}s | 声の終わりから返事の出だしまで {t_asr + t_llm + t_syn + LEAD_SILENCE:.2f}s")
+            print(f"[done]  tts synth {t_syn:.2f}s play {t_play:.2f}s | act {t_act:.2f}s | 声の終わりから返事の出だしまで {t_asr + t_llm + t_syn + CHIME + LEAD_SILENCE:.2f}s")
             log.writerow([time.time(), a.model, a.asr, f"{speech:.2f}", f"{t_asr:.3f}", f"{t_llm:.3f}", f"{t_syn:.3f}", f"{t_play:.3f}", f"{t_act:.3f}",
                           heard, json.dumps(dropped, ensure_ascii=False), ans["say"], ans["action"]]); logf.flush()
             history += [{"role": "user", "content": heard}, {"role": "assistant", "content": json.dumps(ans, ensure_ascii=False)}]
