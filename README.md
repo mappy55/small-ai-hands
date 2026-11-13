@@ -94,7 +94,9 @@ run の最後に `api tokens in=… out=…` と累計トークンが出ます�
 
 ## PiCar-X と声で話す（picar/talk.py）
 
-Raspberry Pi 5 の PiCar-X で動かす、声の会話ループです。耳は AmiVoice API（同期 HTTP）、頭はノート PC の Ollama、口は Open JTalk、手足は picarx。信頼度の低い単語を落とすのと、動作の種類・速さ・時間の制限はコード側でやります。
+Raspberry Pi 5 の PiCar-X で動かす、声の会話ループです。耳は AmiVoice API、頭はノート PC の Ollama、口は Open JTalk、手足は picarx。信頼度の低い単語を落とすのと、動作の種類・速さ・時間の制限はコード側でやります。
+
+耳は二通りです。既定の `--asr ws` は WebSocket のストリーミングで、音がしたらつないでマイクの音を流し、声の始まりと終わりは AmiVoice のサーバーが決めます（`sudo apt install -y python3-websocket` が要ります）。`--asr http` は自作の切り出しで録音してから同期 HTTP で送る方式です。どちらもログ保存なしの接続先を使い、終了時に「声として数えられた秒数」を表示します。
 
 ```bash
 export AMIVOICE_APPKEY=...                     # キーは環境変数だけ

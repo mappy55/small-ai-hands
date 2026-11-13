@@ -16,9 +16,10 @@ talk.py — PiCar-X と声で話す最小のループ（Raspberry Pi 側で動�
 
 標準ライブラリだけで動く。段ごとの秒数を表示し、logs/talk_log.csv に残す。
 """
-import os, sys, io, json, time, wave, array, argparse, subprocess, urllib.request, urllib.error, csv, uuid, shutil, tempfile
+import os, sys, io, json, time, wave, array, argparse, subprocess, urllib.request, urllib.error, csv, uuid, shutil, tempfile, threading, queue
 
 AMIVOICE_URL = "https://acp-api.amivoice.com/v1/nolog/recognize"    # ログ保存なし（家の中の声を送るので）
+AMIVOICE_WS = "wss://acp-api.amivoice.com/v1/nolog/"                # ストリーミング。末尾の / を落とすと「ログ保存あり」になるので注意
 OLLAMA = os.environ.get("OLLAMA_URL", "http://192.168.0.21:11434")
 RATE = 16000
 CHUNK = RATE // 10                       # 0.1 秒
@@ -27,6 +28,7 @@ GAIN_TARGET = 0.7                        # 送る前にピークをここまで�
 LEAD_SILENCE = 0.5                       # 読み上げの先頭に足す助走（秒）
 LEAD_LEVEL = 12                          # 助走の雑音の大きさ（16 ビットで ±12 ＝ 約 -69dB。0 だと完全な無音）
 LAST = {"peak": 0.0, "gain": 1.0}        # 直近の録音のピークと増幅率（表示用）
+BILLED = {"s": 0.0}                      # AmiVoice が声として数えた秒数の累計（概算）
 
 SYSTEM = (
     "あなたは小さな車型ロボット「ピカ」です。持ち主が声で話しかけてきます。音声認識の結果なので、多少の誤字や言い直しが混ざります。"
@@ -67,60 +69,72 @@ def mic_device():
 
 FRAME = RATE // 50                       # 20 ミリ秒
 
-def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=True):
-    """声が始まるまで待ち、黙ったら録音を終える。戻り値: (wav バイト列, 声の秒数, 待った秒数, しきい値) / 声が無ければ None
+def _open_mic(dev):
+    return subprocess.Popen(["arecord", "-q", "-D", dev, "-f", "S16_LE", "-r", str(RATE), "-c", "1", "-t", "raw"],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
-    このマイクの雑音は「常に」でなく「突発的」: 静かなときの床は rms 50〜100 だが、1 秒おきに 40 ミリ秒ほどの
-    プチッ（rms 500〜1500）が入る（noise_check.py で計測）。だから音量が 1〜2 フレーム跳ねただけでは声と見なさず、
-    20 ミリ秒のフレームで「直近 240 ミリ秒のうち 160 ミリ秒以上がしきい値超え」を声の始まりとする。
+def _read_frame(p):
+    b = p.stdout.read(FRAME * 2)
+    if len(b) < FRAME * 2:
+        return None
+    a = array.array("h"); a.frombytes(b); return a
+
+def _gate(p, fixed, wait_sec, verbose):
+    """門番: 音がするまで待つ。戻り値: (取り置きのフレーム, 床, しきい値) / 時間切れやマイク切断は None
+
+    このマイクの雑音は「常に」でなく「突発的」: 静かなときの床は rms 50〜100 だが、40 ミリ秒ほどのプチッ（rms 500〜1500）が入る。
+    だから 1〜2 フレーム跳ねただけでは反応せず、「直近 240 ミリ秒のうち 160 ミリ秒以上がしきい値超え」で開く。
     床は直近 3 秒の下位 20% を追い続ける（読み上げの直後は残響で跳ねるので、決め打ちにしない）。"""
-    p = subprocess.Popen(["arecord", "-q", "-D", dev, "-f", "S16_LE", "-r", str(RATE), "-c", "1", "-t", "raw"],
-                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    def read_chunk():
-        b = p.stdout.read(FRAME * 2)
-        if len(b) < FRAME * 2:
+    recent, pre, win = [], [], []
+    t0 = time.time(); shown = False
+    while True:
+        c = _read_frame(p)
+        if c is None:
             return None
-        a = array.array("h"); a.frombytes(b); return a
+        level = rms(c)
+        recent.append(level); recent = recent[-150:]
+        pre.append(c); pre = pre[-35:]                    # 声の頭を落とさないよう 0.7 秒ぶん持っておく
+        if len(recent) < 25:
+            continue
+        floor = sorted(recent)[len(recent) // 5]
+        thr = fixed or max(floor * 3.0, 200)
+        if verbose and not shown:
+            print(f"   (listening… floor {floor:.0f}, threshold {thr:.0f})", flush=True); shown = True
+        win.append(level > thr); win = win[-12:]
+        if sum(win) >= 8:
+            return pre, floor, thr
+        if time.time() - t0 > wait_sec:
+            return None
+
+def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=True):
+    """自作の切り出し（--asr http 用）: 門番が開いてから、黙るまでを録音する。
+    戻り値: (wav バイト列, 録音の秒数, 0, しきい値) / 声が無ければ None"""
+    p = _open_mic(dev)
     try:
-        recent, pre, buf, started = [], [], [], False
-        win = []                                          # 直近 12 フレームがしきい値を超えたか
-        fixed = thr
-        t0 = time.time(); shown = False
+        g = _gate(p, thr, wait_sec, verbose)
+        if g is None:
+            return None
+        pre, floor, thr_now = g
+        buf = list(pre); tail = []; ended = "max"
+        end_thr = thr or max(floor * 2.0, 150)            # 終わりの判定は少し低めに（語尾は小さい）
+        n_tail = int(end_silence * 50)
+        LAST.update({"floor": floor, "thr": thr_now})
         while True:
-            c = read_chunk()
+            c = _read_frame(p)
             if c is None:
                 break
-            level = rms(c)
-            if not started:
-                recent.append(level); recent = recent[-150:]
-                if len(recent) < 25:
-                    continue
-                floor = sorted(recent)[len(recent) // 5]
-                thr = fixed or max(floor * 3.0, 200)
-                if verbose and not shown:
-                    print(f"   (listening… floor {floor:.0f}, threshold {thr:.0f})", flush=True); shown = True
-                pre.append(c); pre = pre[-35:]            # 声の頭を落とさないよう 0.7 秒ぶん持っておく（判定に 0.24 秒使うぶん長め）
-                win.append(level > thr); win = win[-12:]
-                if sum(win) >= 8:
-                    started = True; buf = list(pre); t_start = time.time()
-                    end_thr = fixed or max(floor * 2.0, 150)   # 終わりの判定は少し低めに（語尾は小さい）
-                    tail = []
-                    LAST.update({"floor": floor, "thr": thr})
-                elif time.time() - t0 > wait_sec:
-                    return None
-            else:
-                buf.append(c)
-                tail.append(level > end_thr); tail = tail[-int(end_silence * 50):]
-                # 黙った = 直近 0.8 秒のうち、しきい値超えが 1 割以下（プチッの 2〜3 フレームは許す）
-                if (len(tail) >= int(end_silence * 50) and sum(tail) <= len(tail) // 10) or len(buf) >= int(max_sec * 50):
-                    break
-        if not started:
-            return None
-        waited = t_start - t0
+            buf.append(c)
+            tail.append(rms(c) > end_thr); tail = tail[-n_tail:]
+            # 黙った = 直近 0.8 秒のうち、しきい値超えが 1 割以下（プチッの 2〜3 フレームは許す）
+            if len(tail) >= n_tail and sum(tail) <= len(tail) // 10:
+                ended = "quiet"; break
+            if len(buf) >= int(max_sec * 50):
+                break
+        LAST["endwait"] = end_silence if ended == "quiet" else 0.0   # 話し終えてから録音を切り上げるまでに待った時間
         samples = array.array("h")
         for c in buf:
             samples.extend(c)
-        # この USB マイクは最大ゲインでもピークが 6〜9% しか出ない。小さいまま送ると AmiVoice が信頼度不足で棄却するので、
+        # この USB マイクは最大ゲインでもピークが 3〜9% しか出ない。小さいまま送ると AmiVoice が信頼度不足で棄却することがあるので、
         # ピークが 70% になるよう増幅してから送る（上限 16 倍。ノイズも一緒に持ち上がる）
         peak = max(1, max(abs(x) for x in samples))
         gain = min(16.0, GAIN_TARGET * 32767 / peak) if GAIN_TARGET else 1.0
@@ -130,9 +144,125 @@ def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=T
         bio = io.BytesIO()
         with wave.open(bio, "wb") as w:
             w.setnchannels(1); w.setsampwidth(2); w.setframerate(RATE); w.writeframes(samples.tobytes())
-        return bio.getvalue(), len(samples) / RATE, waited, thr
+        return bio.getvalue(), len(samples) / RATE, 0.0, thr_now
     finally:
         p.kill(); p.wait()
+
+def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, no_speech=2.5, max_utt=10.0, verbose=True):
+    """ストリーミング（--asr ws）: 門番が開いたら AmiVoice に WebSocket でつなぎ、マイクの音を流す。
+    声の始まり（S）と終わり（E）は AmiVoice のサーバーが決める。自作の「黙ったか」の判定は使わない。
+
+    戻り値: None（門番が開かなかった） / dict
+      {"none": True, ...}        AmiVoice が声を見つけなかった（雑音で門番が開いただけ。課金されない）
+      {"result": {...}, ...}     認識結果（A イベントの JSON。同期 HTTP の応答と同じ形）
+    """
+    try:
+        import websocket                                   # apt: python3-websocket（websocket-client）
+    except ImportError:
+        sys.exit("WebSocket の部品がありません: sudo apt install -y python3-websocket   （または --asr http で従来の方式）")
+    key = os.environ.get("AMIVOICE_APPKEY") or sys.exit("AMIVOICE_APPKEY が設定されていません")
+    p = _open_mic(dev); ws = None
+    try:
+        g = _gate(p, thr, wait_sec, verbose)
+        if g is None:
+            return None
+        pre, floor, thr_now = g
+        t_gate = time.time()
+        t_audio0 = t_gate - len(pre) * 0.02                # 送る音声の先頭が録られた時刻（おおよそ）
+        ws = websocket.create_connection(AMIVOICE_WS, timeout=10)
+        ws.send(f"s LSB16K {engine} authorization={key}")
+        r = ws.recv()
+        if (r or "").strip() != "s":
+            raise RuntimeError(f"AmiVoice: {r}")
+        t_conn = time.time() - t_gate
+        q = queue.Queue()
+        def reader():
+            try:
+                while True:
+                    m = ws.recv()
+                    q.put((time.time(), m if isinstance(m, str) else m.decode("utf-8", "replace")))
+            except Exception:
+                q.put((time.time(), None))
+        threading.Thread(target=reader, daemon=True).start()
+        sent = array.array("h")
+        def send(frames):
+            for c in frames:
+                if gain and gain != 1.0:
+                    c = array.array("h", (max(-32768, min(32767, int(x * gain))) for x in c))
+                sent.extend(c)
+                ws.send_binary(b"p" + c.tobytes())
+        send(pre)
+        t_S = t_E = t_A = t_e = None; result = None; closed = False
+        t_stream = time.time()
+        while result is None and not closed:
+            try:
+                while True:
+                    tm, m = q.get_nowait()
+                    if m is None:
+                        closed = True; break
+                    ev, body = m[:1], m[2:]
+                    if ev == "S" and t_S is None:
+                        t_S = tm
+                    elif ev == "E" and t_E is None:
+                        t_E = tm
+                    elif ev == "A":
+                        result = json.loads(body); t_A = tm
+                    elif ev == "e":                        # セッション終了の応答。A が無ければ声は検出されなかった
+                        closed = True
+                        if body.strip():
+                            raise RuntimeError(f"AmiVoice: e {body}")
+                    elif ev == "p" and body.strip():
+                        raise RuntimeError(f"AmiVoice: p {body}")
+            except queue.Empty:
+                pass
+            if result is not None or closed:
+                break
+            now = time.time()
+            if t_e is None:
+                # 終わらせる条件: サーバーが声の終わりを知らせた / 声が始まらない / 長すぎる
+                if t_E is not None or (t_S is None and now - t_stream > no_speech) or (now - t_stream > max_utt):
+                    ws.send("e"); t_e = now
+                else:
+                    c = _read_frame(p)
+                    if c is None:
+                        break
+                    send([c])
+            else:
+                if now - t_e > 6.0:                        # 結果が来ない
+                    break
+                time.sleep(0.01)
+        bio = io.BytesIO()
+        with wave.open(bio, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(RATE); w.writeframes(sent.tobytes())
+        LAST.update({"floor": floor, "thr": thr_now, "peak": (max(abs(x) for x in sent) / 32768 / (gain or 1.0)) if sent else 0.0, "gain": gain or 1.0})
+        info = {"wav": bio.getvalue(), "sent_s": len(sent) / RATE, "t_conn": t_conn, "t_audio0": t_audio0,
+                "t_S": t_S, "t_E": t_E, "t_A": t_A}
+        if result is None:
+            info["none"] = True
+        else:
+            info["result"] = result
+        return info
+    finally:
+        p.kill(); p.wait()
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+def parse_result(r):
+    """AmiVoice の認識結果（同期 HTTP の応答 / WebSocket の A イベント）を読む。
+    戻り値: (文 or None=棄却, [(表記, 信頼度)], 読み, 声として数えられた秒数)"""
+    if r.get("code") == "o":                 # 信頼度がしきい値未満で棄却（声が小さい・雑音・途中で切れた）
+        return None, [], "", 0.0
+    if r.get("code"):
+        raise RuntimeError(f"AmiVoice: {r.get('code')} {r.get('message')}")
+    results = r.get("results", [])
+    toks = [t for res in results for t in res.get("tokens", [])]
+    tokens = [(t.get("written", ""), float(t.get("confidence", 0))) for t in toks]
+    spoken = "".join(t.get("spoken", "") for t in toks)
+    billed = sum(max(0, res.get("endtime", 0) - res.get("starttime", 0)) for res in results) / 1000.0
+    return r.get("text", ""), tokens, spoken, billed
 
 def meter(dev, seconds=15):
     """音量計: 0.5 秒ごとの音量を表示する。黙っているときと話しているときの差を見るため"""
@@ -168,14 +298,9 @@ def amivoice(wav_bytes, engine="-a-general"):
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"AmiVoice API {e.code}: {e.read().decode('utf-8', 'replace')[:200]}")
     wall = time.time() - t0
-    if r.get("code") == "o":                 # 信頼度がしきい値未満で棄却（声が小さい・雑音・途中で切れた）
-        return None, [], wall, ""
-    if r.get("code"):
-        raise RuntimeError(f"AmiVoice: {r.get('code')} {r.get('message')}")
-    toks = [t for res in r.get("results", []) for t in res.get("tokens", [])]
-    tokens = [(t.get("written", ""), float(t.get("confidence", 0))) for t in toks]
-    spoken = "".join(t.get("spoken", "") for t in toks)
-    return r.get("text", ""), tokens, wall, spoken
+    text, tokens, spoken, billed = parse_result(r)
+    LAST["billed"] = billed
+    return text, tokens, wall, spoken
 
 # ---------------------------------------------------------------- 判定: 信頼度の低い単語を落とす
 def clean_tokens(tokens, min_conf):
@@ -274,7 +399,10 @@ def main():
     ap.add_argument("--seconds", type=float, default=1.0, help="1 回の動作の長さ（秒）")
     ap.add_argument("--min-conf", type=float, default=0.6, help="この信頼度未満の単語は落とす")
     ap.add_argument("--thr", type=float, default=0, help="声と見なす音量のしきい値（0 で自動）")
-    ap.add_argument("--wav", help="マイクの代わりにこの wav を 1 回だけ処理する（確認用）")
+    ap.add_argument("--asr", choices=["ws", "http"], default="ws",
+                    help="ws: AmiVoice のストリーミング（声の始まりと終わりをサーバーが決める）。http: 自作の切り出し＋同期 HTTP")
+    ap.add_argument("--stream-gain", type=float, default=5.0, help="ws で送る音の増幅率（このマイクは小さいので既定 5 倍）")
+    ap.add_argument("--wav", help="マイクの代わりにこの wav を 1 回だけ処理する（確認用。同期 HTTP で送る）")
     ap.add_argument("--meter", action="store_true", help="音量計だけ動かす（15 秒。読み上げ → 黙る → 話す、で床と声の差を見る）")
     ap.add_argument("--say-first", action="store_true", help="--meter の前に読み上げを 1 回鳴らす（スピーカーを使ったあとの床を見る）")
     ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
@@ -282,7 +410,7 @@ def main():
     ap.add_argument("--lead-level", type=int, default=12, help="助走の雑音の大きさ（0 で完全な無音。DAC が無音で消音するので小さな雑音にしている）")
     ap.add_argument("--history", type=int, default=0, help="モデルに見せる過去のやりとりの数（往復）。0 だと毎回その一言だけで判断する")
     ap.add_argument("--keep", default="logs/talk_wavs", help="送った音声を残すディレクトリ（'' で残さない）。棄却された声を後で調べるため")
-    ap.add_argument("--log", default="logs/talk_log.csv")
+    ap.add_argument("--log", default="logs/talk_log2.csv")
     a = ap.parse_args()
 
     for tool in ("arecord", "aplay", "open_jtalk"):
@@ -308,8 +436,8 @@ def main():
     new = not os.path.exists(a.log)
     logf = open(a.log, "a", newline="", encoding="utf-8"); log = csv.writer(logf)
     if new:
-        log.writerow(["time", "model", "speech_s", "asr_s", "llm_s", "tts_synth_s", "tts_play_s", "act_s", "heard", "dropped", "say", "action"])
-    print(f"== mic {dev}  model {a.model} @ {OLLAMA}  move={'ON' if a.move else 'off (dry run)'}  min_conf={a.min_conf}")
+        log.writerow(["time", "model", "asr", "speech_s", "heard_in_s", "llm_s", "tts_synth_s", "tts_play_s", "act_s", "heard", "dropped", "say", "action"])
+    print(f"== mic {dev}  asr {a.asr}  model {a.model} @ {OLLAMA}  move={'ON' if a.move else 'off (dry run)'}  min_conf={a.min_conf}")
 
     # まず届くかを軽く確かめ、それからモデルを温める（初回の読み込みは 1〜数分かかることがあるので長めに待つ）
     try:
@@ -330,30 +458,64 @@ def main():
     history = []
     try:
         while True:
-            if a.wav:
-                wav_bytes = open(a.wav, "rb").read(); speech = 0.0
+            detail = ""
+            if a.wav or a.asr == "http":
+                if a.wav:
+                    wav_bytes = open(a.wav, "rb").read(); speech = 0.0; LAST["endwait"] = 0.0
+                else:
+                    got = listen(dev, thr=a.thr or None)
+                    if got is None:
+                        continue
+                    wav_bytes, speech, _, _ = got
+                n_utt += 1
+                if a.keep and not a.wav:
+                    with open(os.path.join(a.keep, f"{time.strftime('%H%M%S')}_{n_utt:03d}.wav"), "wb") as f:
+                        f.write(wav_bytes)
+                try:
+                    text, tokens, t_http, spoken = amivoice(wav_bytes)
+                except Exception as e:
+                    print(f"   !! {e}"); time.sleep(1); continue
+                billed = LAST.get("billed", 0.0)
+                # 話し終えてから文字になるまで = 自作の「黙った」判定の待ち（0.8 秒）＋ 送ってから返るまで
+                t_asr = LAST.get("endwait", 0.0) + t_http
+                detail = f"endpoint wait {LAST.get('endwait', 0.0):.1f}s + http {t_http:.2f}s, recorded {speech:.1f}s"
             else:
-                got = listen(dev, thr=a.thr or None)
+                try:
+                    got = listen_stream(dev, thr=a.thr or None, gain=a.stream_gain)
+                except Exception as e:
+                    print(f"   !! {e}"); time.sleep(1); continue
                 if got is None:
                     continue
-                wav_bytes, speech, _, _ = got
-            n_utt += 1
-            if a.keep and not a.wav:
-                with open(os.path.join(a.keep, f"{time.strftime('%H%M%S')}_{n_utt:03d}.wav"), "wb") as f:
-                    f.write(wav_bytes)
-            try:
-                text, tokens, t_asr, spoken = amivoice(wav_bytes)
-            except Exception as e:
-                print(f"   !! {e}"); time.sleep(1); continue
-            lvl = f"speech {speech:.1f}s, peak {LAST['peak']*100:.0f}% x{LAST['gain']:.1f}, floor {LAST.get('floor', 0):.0f}"
+                n_utt += 1
+                if a.keep:
+                    with open(os.path.join(a.keep, f"{time.strftime('%H%M%S')}_{n_utt:03d}.wav"), "wb") as f:
+                        f.write(got["wav"])
+                if got.get("none"):
+                    # 門番は開いたが、AmiVoice は声を見つけなかった（雑音）。発話区間が無いので課金もされない
+                    print(f"   (no speech found by AmiVoice: sent {got['sent_s']:.1f}s, conn {got['t_conn']:.2f}s)")
+                    continue
+                try:
+                    text, tokens, spoken, billed = parse_result(got["result"])
+                except Exception as e:
+                    print(f"   !! {e}"); time.sleep(1); continue
+                res = got["result"].get("results", [])
+                speech = billed
+                # 話し終えてから文字になるまで: 結果が届いた時刻 −（送った音声の先頭の時刻 ＋ 声の終わりの位置）
+                end_ms = res[-1].get("endtime", 0) if res else 0
+                t_asr = max(0.0, got["t_A"] - (got["t_audio0"] + end_ms / 1000.0)) if got.get("t_A") else 0.0
+                e2a = (got["t_A"] - got["t_E"]) if got.get("t_A") and got.get("t_E") else None
+                detail = (f"ws conn {got['t_conn']:.2f}s, sent {got['sent_s']:.1f}s"
+                          + (f", E→A {e2a:.2f}s" if e2a is not None else ", no E event"))
+            BILLED["s"] += billed
+            lvl = f"speech {speech:.1f}s, peak {LAST['peak']*100:.0f}% x{LAST['gain']:.1f}, floor {LAST.get('floor', 0):.0f}; {detail}"
             if text is None:
-                print(f"[heard] (rejected by AmiVoice: confidence too low)  asr {t_asr:.2f}s ({lvl})")
-                log.writerow([time.time(), a.model, f"{speech:.2f}", f"{t_asr:.3f}", 0, 0, 0, 0, "(rejected)", "", "", ""]); logf.flush()
+                print(f"[heard] (rejected by AmiVoice: confidence too low)  heard in {t_asr:.2f}s ({lvl})")
+                log.writerow([time.time(), a.model, a.asr, f"{speech:.2f}", f"{t_asr:.3f}", 0, 0, 0, 0, "(rejected)", "", "", ""]); logf.flush()
                 if a.wav:
                     break
                 continue
             heard, dropped = clean_tokens(tokens, a.min_conf)
-            print(f"[heard] {text!r}  asr {t_asr:.2f}s ({lvl})"
+            print(f"[heard] {text!r}  heard in {t_asr:.2f}s ({lvl})"
                   + (f"  dropped {[(w, round(c, 2)) for w, c in dropped]} -> {heard!r}" if dropped else ""))
             if not heard.strip():
                 if tokens:                                   # 何か聞こえたが全部あやしい → 動かずに聞き返す
@@ -371,7 +533,7 @@ def main():
             t_syn, t_play = say(ans["say"])
             t_act = car.act(ans["action"])
             print(f"[done]  tts synth {t_syn:.2f}s play {t_play:.2f}s | act {t_act:.2f}s | 声の終わりから返事の出だしまで {t_asr + t_llm + t_syn + LEAD_SILENCE:.2f}s")
-            log.writerow([time.time(), a.model, f"{speech:.2f}", f"{t_asr:.3f}", f"{t_llm:.3f}", f"{t_syn:.3f}", f"{t_play:.3f}", f"{t_act:.3f}",
+            log.writerow([time.time(), a.model, a.asr, f"{speech:.2f}", f"{t_asr:.3f}", f"{t_llm:.3f}", f"{t_syn:.3f}", f"{t_play:.3f}", f"{t_act:.3f}",
                           heard, json.dumps(dropped, ensure_ascii=False), ans["say"], ans["action"]]); logf.flush()
             history += [{"role": "user", "content": heard}, {"role": "assistant", "content": json.dumps(ans, ensure_ascii=False)}]
             if a.wav:
@@ -380,6 +542,8 @@ def main():
         print("\n== bye")
     finally:
         car.close(); logf.close()
+        # 声として数えられた秒数（認識結果の開始〜終了の合計）。汎用・ログ保存なしの単価 0.04125 円/秒で概算（無料枠・クーポンを引く前）
+        print(f"== AmiVoice が声として数えた秒数（概算）: {BILLED['s']:.1f}s ≒ {BILLED['s'] * 0.04125:.2f} 円")
 
 if __name__ == "__main__":
     main()
