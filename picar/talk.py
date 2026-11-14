@@ -634,7 +634,10 @@ def main():
     # 頭の返事が 0.8〜2 秒遅くなった（動き出し 1.8〜2.0 秒 → 2.6〜4.0 秒）
     ap.add_argument("--ahead", action="store_true", help="先回り（AmiVoice の途中経過で先に頭に聞く）を使う。実測では逆に遅くなった")
     ap.add_argument("--post-time", type=int, default=0, help="AmiVoice が発話の終わりとみなす無音の長さ（ミリ秒。0 で既定の 550）")
-    ap.add_argument("--code", action="store_true", help="頭に短い記号（F1, L2, N など）で答えさせ、動くときの返事はコードで決める")
+    # 記号で答えさせる方式を既定にする（実測: 頭 1.7 秒 → 1.0 秒、動き出し 1.8 秒 → 1.3 秒、6 回中 6 回正解）
+    ap.add_argument("--no-code", dest="code", action="store_false", help="以前の方式: 頭に動作・回数・返事の文をすべて書かせる")
+    ap.add_argument("--code", dest="code", action="store_true", help="（既定になったので指定不要）頭に短い記号（F1, L2, N など）で答えさせ、動くときの返事はコードで決める")
+    ap.set_defaults(code=True)
     ap.add_argument("--no-early", action="store_true", help="頭の答えが全部そろってから動かす（以前の方式）")
     ap.add_argument("--max-times", type=int, default=3, help="繰り返しの上限（頭が何回と答えても、ここまで）")
     ap.add_argument("--gate", action="store_true", help="以前の方式: 自作の門番が開いたときだけ AmiVoice につなぐ（既定は、聞いている間ずっとつないでおく）")
