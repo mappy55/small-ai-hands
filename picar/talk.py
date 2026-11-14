@@ -153,7 +153,7 @@ def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=T
     finally:
         p.kill(); p.wait()
 
-def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, no_speech=2.5, max_utt=10.0, verbose=True):
+def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, no_speech=2.5, max_utt=10.0, verbose=True, gate=True):
     """ストリーミング（--asr ws）: 門番が開いたら AmiVoice に WebSocket でつなぎ、マイクの音を流す。
     声の始まり（S）と終わり（E）は AmiVoice のサーバーが決める。自作の「黙ったか」の判定は使わない。
 
@@ -170,10 +170,19 @@ def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, n
     try:
         # ストリーミングでは門番をゆるくする: 声かどうかは AmiVoice が決め、声でなければ課金もされない。
         # 厳しい門番（床の 3 倍・160ms）だと「バックして」のような短く小さい発話で開かなかった
-        g = _gate(p, thr, wait_sec, verbose, factor=2.2, floor_min=150, need=5)
-        if g is None:
-            return None
-        pre, floor, thr_now = g
+        # gate=False（--open-mic）: 門番を使わず、聞き始めたらすぐつないで流し続ける。走った後は雑音の床が上がり、
+        # 門番が雑音で開いて 3 秒つないでは切る、を繰り返し、その切れ目に声が落ちて頭や全体を聞き逃した（実測）。
+        # 課金は AmiVoice が声と判定した区間だけなので、つなぎっぱなしでも無音や雑音のぶんは数えられない
+        if gate:
+            g = _gate(p, thr, wait_sec, verbose, factor=2.2, floor_min=150, need=5)
+            if g is None:
+                return None
+            pre, floor, thr_now = g
+        else:
+            pre, floor, thr_now = [], 0.0, 0.0
+            no_speech = max(no_speech, 25.0)
+            if verbose:
+                print("   (listening… open mic)")
         t_gate = time.time()
         t_audio0 = t_gate - len(pre) * 0.02                # 送る音声の先頭が録られた時刻（おおよそ）
         ws = websocket.create_connection(AMIVOICE_WS, timeout=10)
@@ -227,7 +236,7 @@ def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, n
             now = time.time()
             if t_e is None:
                 # 終わらせる条件: サーバーが声の終わりを知らせた / 声が始まらない / 長すぎる
-                if t_E is not None or (t_S is None and now - t_stream > no_speech) or (now - t_stream > max_utt):
+                if t_E is not None or (t_S is None and now - t_stream > no_speech) or (now - (t_S or t_stream) > max(max_utt, 0 if t_S else no_speech + 1)):
                     ws.send("e"); t_e = now
                 else:
                     c = _read_frame(p)
@@ -448,6 +457,7 @@ def main():
     ap.add_argument("--tts-rate", type=float, default=1.0, help="読み上げの速さ（1.0 が標準、1.3 で速め）")
     ap.add_argument("--tts-peak", type=float, default=0.9, help="読み上げの声のピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--chime", type=float, default=0.0, help="読み上げの前に鳴らす合図音の秒数（既定は鳴らさない。頭切れの原因はアンプが切れていたことで、合図音は不要だった）")
+    ap.add_argument("--open-mic", action="store_true", help="門番を使わず、聞いている間ずっと AmiVoice につないでおく（--asr ws のみ）")
     ap.add_argument("--act-after-say", action="store_true", help="以前の順番（読み上げが終わってから動く）に戻す")
     ap.add_argument("--lead", type=float, default=0.25, help="合図音と文の間の秒数")
     ap.add_argument("--lead-level", type=int, default=100, help="その間をつなぐ雑音の大きさ（0 で完全な無音）")
@@ -528,7 +538,7 @@ def main():
                 detail = f"endpoint wait {LAST.get('endwait', 0.0):.1f}s + http {t_http:.2f}s, recorded {speech:.1f}s"
             else:
                 try:
-                    got = listen_stream(dev, thr=a.thr or None, gain=a.stream_gain)
+                    got = listen_stream(dev, thr=a.thr or None, gain=a.stream_gain, gate=not a.open_mic)
                 except Exception as e:
                     print(f"   !! {e}"); time.sleep(1); continue
                 if got is None:
