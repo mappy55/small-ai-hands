@@ -156,7 +156,7 @@ def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=T
     finally:
         p.kill(); p.wait()
 
-def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, no_speech=2.5, max_utt=10.0, verbose=True, gate=True, on_interim=None, post_time=0):
+def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, no_speech=2.5, max_utt=10.0, verbose=True, gate=True, on_interim=None, post_time=0, words=""):
     """ストリーミング（--asr ws）: 門番が開いたら AmiVoice に WebSocket でつなぎ、マイクの音を流す。
     声の始まり（S）と終わり（E）は AmiVoice のサーバーが決める。自作の「黙ったか」の判定は使わない。
 
@@ -190,7 +190,8 @@ def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, n
         t_audio0 = t_gate - len(pre) * 0.02                # 送る音声の先頭が録られた時刻（おおよそ）
         ws = websocket.create_connection(AMIVOICE_WS, timeout=10)
         # postTime: 声の後にこの長さの無音が続いたら発話の終わりとみなす（AmiVoice の既定は 550 ミリ秒）
-        ws.send(f"s LSB16K {engine} authorization={key}" + (f' segmenterProperties="postTime={int(post_time)}"' if post_time else ""))
+        ws.send(f"s LSB16K {engine} authorization={key}" + (f' segmenterProperties="postTime={int(post_time)}"' if post_time else "")
+                + (f' profileWords="{words}"' if words else ""))        # 単語登録: 「表記 読み|表記 読み」
         r = ws.recv()
         if (r or "").strip() != "s":
             raise RuntimeError(f"AmiVoice: {r}")
@@ -363,11 +364,13 @@ SYSTEM_CODE = (
     "あなたは小さな車型ロボット「ピカ」です。持ち主が声で話しかけてきます（音声認識の結果なので誤字が混ざります）。"
     "c に記号を一つ選ぶ。F=前へ B=後ろへ L=左へ曲がる R=右へ曲がる。後ろの数字は回数で、言われなければ 1、最大 3。S=止まる。N=動かない。"
     "動けと言われたときだけ F B L R S。あいさつ、質問、雑談は必ず N。迷ったら N。"
-    "say は N のときだけ書く（話し言葉で一言。記号や絵文字は使わない）。それ以外は空。\n"
+    "say は N のときだけ書く。言われたことへの返事を、話し言葉で一言（質問には答える。分からなければ分からないと言う）。記号や絵文字は使わない。N 以外は空。\n"
     '例: 「前に進んで」→ {"c":"F1","say":""}\n'
     '例: 「左に2回曲がって」→ {"c":"L2","say":""}\n'
     '例: 「バックして」→ {"c":"B1","say":""}\n'
     '例: 「こんにちは」→ {"c":"N","say":"こんにちは。"}\n'
+    '例: 「今日の気分はどう」→ {"c":"N","say":"元気です。走りたい気分です。"}\n'
+    '例: 「好きな食べ物は」→ {"c":"N","say":"電気です。充電が大好きです。"}\n'
     '例: 「止まって」→ {"c":"S","say":""}'
 )
 SCHEMA_CODE = {"type": "object", "properties": {"c": {"type": "string", "enum": CODES}, "say": {"type": "string"}}, "required": ["c", "say"]}
@@ -487,6 +490,23 @@ class Memo:
             os.replace(tmp, self.path)
         except Exception as e:
             print(f"   (控えを保存できません: {e})")
+
+def find_wake(heard, spoken, wake):
+    """呼びかけの言葉（「ピカ」など）を探す。戻り値: (呼ばれたか, 呼びかけを除いた文)
+    表記（カタカナ・ひらがな）と読みの両方で探す。呼びかけの後ろに続く文を命令として返す（後ろが空なら前の部分）"""
+    if not wake:
+        return True, heard
+    kata = "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in wake)
+    hira = "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in wake)
+    for w in (kata + "ー", hira + "ー", kata, hira):
+        i = heard.find(w)
+        if i >= 0:
+            rest = re.sub(r"^(ちゃん|くん)?[、。 　,]*", "", heard[i + len(w):]) or heard[:i].rstrip("、。 　,")
+            return True, rest
+    sp = "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in (spoken or ""))
+    if hira in sp:                                         # 表記は別の字（同じ読みの別の言葉）になったが、読みは合っている
+        return True, heard
+    return False, heard
 
 def norm_text(t):
     """途中経過と確定の文を比べるための正規化: 句読点・空白・途中経過の末尾に付く「.」を取る"""
@@ -664,6 +684,9 @@ def main():
     ap.set_defaults(code=True)
     ap.add_argument("--no-memo", dest="memo", action="store_false", help="頭の答えを控えない（毎回頭に聞く）")
     ap.add_argument("--memo-file", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "head_memo.json"))
+    ap.add_argument("--wake", default="", help="呼びかけの言葉（例: ピカ）。指定すると、この言葉が入った文だけを相手にする")
+    ap.add_argument("--wake-window", type=float, default=0.0, help="返事をしてからこの秒数は、呼びかけなしでも受け付ける（0 で毎回呼びかけが必要）")
+    ap.add_argument("--words", default="", help='AmiVoice の単語登録（--asr ws のみ）。「表記 読み|表記 読み」の形。例: "ピカ ぴか"')
     ap.add_argument("--no-early", action="store_true", help="頭の答えが全部そろってから動かす（以前の方式）")
     ap.add_argument("--max-times", type=int, default=3, help="繰り返しの上限（頭が何回と答えても、ここまで）")
     ap.add_argument("--gate", action="store_true", help="以前の方式: 自作の門番が開いたときだけ AmiVoice につなぐ（既定は、聞いている間ずっとつないでおく）")
@@ -694,7 +717,7 @@ def main():
     enable_speaker()                                          # Picarx の初期化のあとに入れる（初期化でピンが変わっても上書きする）
     if a.keep:
         os.makedirs(a.keep, exist_ok=True)
-    n_utt = 0; spec = None
+    n_utt = 0; spec = None; wake_until = 0.0
     memo = Memo(a.memo_file, a.model) if (a.memo and a.history == 0) else None
     if a.meter:
         if a.say_first:
@@ -757,7 +780,7 @@ def main():
                         spec.close()
                     spec = Spec(a.model) if (a.ahead and a.history == 0 and not a.act_after_say and not a.no_early) else None
                     got = listen_stream(dev, thr=a.thr or None, gain=a.stream_gain, gate=a.gate,
-                                        on_interim=spec.feed if spec else None, post_time=a.post_time)
+                                        on_interim=spec.feed if spec else None, post_time=a.post_time, words=a.words)
                 except Exception as e:
                     print(f"   !! {e}"); time.sleep(1); continue
                 if got is None:
@@ -798,6 +821,20 @@ def main():
             if got is not None and got.get("interim") and got.get("t_A"):
                 # 途中経過の移り変わり（確定の何秒前に、どの文になったか）
                 print("        interim: " + " | ".join(f"{tm - got['t_A']:+.2f}s {u!r}" for tm, u in got["interim"][-6:]))
+            # 呼びかけ（--wake）: つなぎっぱなしだと、ロボットに向けていない会話も全部聞こえる。
+            # 呼びかけの言葉が入った文だけを相手にし、それ以外は頭にも送らず、返事もしない
+            if a.wake:
+                called, rest = find_wake(heard, spoken, a.wake)
+                if not called and time.time() < wake_until:
+                    called, rest = True, heard             # 直前に呼ばれた続き（--wake-window 秒以内）
+                if not called:
+                    print("        （呼びかけなし。聞き流す）")
+                    log.writerow([time.time(), a.model, a.asr, f"{speech:.2f}", f"{t_asr:.3f}", 0, 0, 0, 0, heard, "", "(no wake)", ""]); logf.flush()
+                    continue
+                if not rest.strip():                       # 呼ばれただけ。返事をして、続きを待つ
+                    say("はい。"); wake_until = time.time() + max(a.wake_window, 6.0)
+                    continue
+                heard = rest
             if not heard.strip():
                 if tokens:                                   # 何か聞こえたが全部あやしい → 動かずに聞き返す
                     say("すみません、もう一度お願いします。")
@@ -867,6 +904,8 @@ def main():
                   + (f"、動き出しまで {t_move:.2f}s" if ans["action"] != "none" else ""))
             log.writerow([time.time(), a.model, a.asr, f"{speech:.2f}", f"{t_asr:.3f}", f"{t_llm:.3f}", f"{t_syn:.3f}", f"{t_play:.3f}", f"{t_act:.3f}",
                           heard, json.dumps(dropped, ensure_ascii=False), ans["say"], ans["action"] + (f" x{ans['times']}" if ans["times"] > 1 else "")]); logf.flush()
+            if a.wake and a.wake_window > 0:
+                wake_until = time.time() + a.wake_window
             history += [{"role": "user", "content": heard}, {"role": "assistant", "content": json.dumps(ans, ensure_ascii=False)}]
             if a.wav:
                 break
