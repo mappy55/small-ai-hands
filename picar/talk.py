@@ -367,16 +367,18 @@ def ask_llm(model, history, text, timeout=120, on_early=None):
     stream = on_early is not None
     body = {"model": model, "stream": stream, "format": SCHEMA, "options": {"temperature": 0, "num_ctx": 4096}, "messages": msgs}
     req = urllib.request.Request(f"{OLLAMA}/api/chat", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-    t0 = time.time(); t_early = None; early = None
+    t0 = time.time(); t_early = None; early = None; last = {}; t_first = None
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         if not stream:
-            content = json.loads(resp.read()).get("message", {}).get("content", "")
+            last = json.loads(resp.read()); content = last.get("message", {}).get("content", "")
         else:
             content = ""
             for line in resp:                              # 1 行に 1 つの JSON（書きかけの答えのかけら）
                 if not line.strip():
                     continue
                 r = json.loads(line)
+                if t_first is None:
+                    t_first = time.time() - t0             # 最初のかけらが届くまで（読み込み＋指示文の処理＋通信）
                 content += r.get("message", {}).get("content", "")
                 if early is None:
                     e = early_action(content)
@@ -385,6 +387,7 @@ def ask_llm(model, history, text, timeout=120, on_early=None):
                         early = (act, times); t_early = time.time() - t0
                         on_early(act, times, t_early)
                 if r.get("done"):
+                    last = r
                     break
     wall = time.time() - t0
     try:
@@ -399,6 +402,11 @@ def ask_llm(model, history, text, timeout=120, on_early=None):
         # 頭の返事は「10回曲がります」のままなので、体がやることと口が言うことが食い違う。縛ったときは返事もコードで差し替える
         ans["say"] = f"{MAX_TIMES}回までにします。"
     ans.setdefault("say", "")
+    # 頭の中の内訳（Ollama の申告。単位はナノ秒）: モデルの読み込み / 指示文と質問の処理 / 答えの生成
+    ns = lambda k: last.get(k, 0) / 1e9
+    ans["stats"] = (f"load {ns('load_duration'):.2f}s, prompt {last.get('prompt_eval_count', 0)} tok {ns('prompt_eval_duration'):.2f}s, "
+                    f"gen {last.get('eval_count', 0)} tok {ns('eval_duration'):.2f}s, total {ns('total_duration'):.2f}s"
+                    + (f", first chunk {t_first:.2f}s" if t_first is not None else ""))
     return ans, wall, content
 
 # ---------------------------------------------------------------- 口: Open JTalk
@@ -658,6 +666,7 @@ def main():
                 continue
             print(f"[think] llm {t_llm:.2f}s" + (f"（動作は {ans['t_early']:.2f}s で確定）" if "t_early" in ans else "") + f" -> say {ans['say']!r}  action {ans['action']}"
                   + (f" x{ans['times']}" + (f"（頭の答えは {ans['times_asked']} 回、上限 {MAX_TIMES}）" if ans['times_asked'] != ans['times'] else "") if ans['action'] not in ("none", "stop") and (ans['times'] > 1 or ans['times_asked'] != ans['times']) else ""))
+            print(f"        ({ans['stats']})")
             # 動作は返事の読み上げと同時に始める。以前は読み上げ（約 3 秒）が終わってから動かしていたので、
             # 声の終わりから動き出しまでが 6 秒近くあった（表示していた「返事の出だしまで」には入っていなかった）
             if a.act_after_say:
