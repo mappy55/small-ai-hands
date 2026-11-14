@@ -588,7 +588,10 @@ def main():
     ap.add_argument("--tts-rate", type=float, default=1.0, help="読み上げの速さ（1.0 が標準、1.3 で速め）")
     ap.add_argument("--tts-peak", type=float, default=0.9, help="読み上げの声のピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--chime", type=float, default=0.0, help="読み上げの前に鳴らす合図音の秒数（既定は鳴らさない。頭切れの原因はアンプが切れていたことで、合図音は不要だった）")
-    ap.add_argument("--no-ahead", dest="ahead", action="store_false", help="先回り（途中経過で先に頭に聞く）をしない")
+    # 先回りは既定で使わない。実測では、文の全体が途中経過に出るのは確定の 0.05〜0.14 秒前で、稼げる時間がほとんど無い。
+    # 一方、言葉の途中の間（「左に」で 0.6 秒止まる等）で先回りが始まり、捨てた問い合わせの後ろに本番が並んで、
+    # 頭の返事が 0.8〜2 秒遅くなった（動き出し 1.8〜2.0 秒 → 2.6〜4.0 秒）
+    ap.add_argument("--ahead", action="store_true", help="先回り（AmiVoice の途中経過で先に頭に聞く）を使う。実測では逆に遅くなった")
     ap.add_argument("--post-time", type=int, default=0, help="AmiVoice が発話の終わりとみなす無音の長さ（ミリ秒。0 で既定の 550）")
     ap.add_argument("--no-early", action="store_true", help="頭の答えが全部そろってから動かす（以前の方式）")
     ap.add_argument("--max-times", type=int, default=3, help="繰り返しの上限（頭が何回と答えても、ここまで）")
