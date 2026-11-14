@@ -25,6 +25,7 @@ RATE = 16000
 CHUNK = RATE // 10                       # 0.1 秒
 ACTIONS = ["forward", "backward", "left", "right", "stop", "none"]
 GAIN_TARGET = 0.7                        # 送る前にピークをここまで増幅する（0 で増幅しない）
+TTS_PEAK = 0.9                           # 読み上げの声のピークをここまで増幅する（0 で増幅しない）
 CHIME = 0.15                             # 読み上げの前の合図音（ピッ）の長さ（秒）。0 で鳴らさない
 CHIME_LEVEL = 5000                       # 合図音の大きさ（16 ビットで ±5000 ＝ 約 -16dB）
 LEAD_SILENCE = 0.25                      # 合図音と文の間（秒）
@@ -335,6 +336,17 @@ def ask_llm(model, history, text, timeout=120):
 DIC = "/var/lib/mecab/dic/open-jtalk/naist-jdic"
 VOICE = "/usr/share/hts-voice/nitech-jp-atr503-m001/nitech_jp_atr503_m001.htsvoice"
 
+def enable_speaker():
+    """Robot HAT のアンプを入れる。アンプの入り切りは GPIO 20 で、I2S の DAC を有効にするとこのピンが
+    I2S の入力（a2）に取られて lo のまま＝アンプが切れた状態になる。出力・high にすると鳴る。"""
+    try:
+        subprocess.run(["pinctrl", "set", "20", "op", "dh"], check=True, timeout=5,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception as e:
+        print(f"   (スピーカーのアンプを入れられませんでした: {e} — 音が出なければ `pinctrl set 20 op dh` を手で実行)")
+        return False
+
 def say(text, wav=None):
     """読み上げる。戻り値: (合成の秒数, 再生の秒数)"""
     if not text.strip():
@@ -353,6 +365,12 @@ def say(text, wav=None):
             params = w.getparams(); frames = w.readframes(w.getnframes())
         if params.sampwidth == 2:
             sr, ch = params.framerate, params.nchannels
+            if TTS_PEAK > 0:                                  # Open JTalk の声は小さめなので、ピークをそろえて大きくする
+                body = array.array("h"); body.frombytes(frames)
+                pk = max(1, max(abs(x) for x in body)) if body else 1
+                g = TTS_PEAK * 32767 / pk
+                if g > 1.05:
+                    frames = array.array("h", (max(-32768, min(32767, int(x * g))) for x in body)).tobytes()
             lead = array.array("h")
             n_chime = int(sr * CHIME)
             for k in range(n_chime):
@@ -414,6 +432,7 @@ def main():
     ap.add_argument("--meter", action="store_true", help="音量計だけ動かす（15 秒。読み上げ → 黙る → 話す、で床と声の差を見る）")
     ap.add_argument("--say-first", action="store_true", help="--meter の前に読み上げを 1 回鳴らす（スピーカーを使ったあとの床を見る）")
     ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
+    ap.add_argument("--tts-peak", type=float, default=0.9, help="読み上げの声のピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--chime", type=float, default=0.15, help="読み上げの前に鳴らす合図音の秒数（アンプを起こして文の頭が切れるのを防ぐ。0 で鳴らさない）")
     ap.add_argument("--lead", type=float, default=0.25, help="合図音と文の間の秒数")
     ap.add_argument("--lead-level", type=int, default=100, help="その間をつなぐ雑音の大きさ（0 で完全な無音）")
@@ -425,13 +444,15 @@ def main():
     for tool in ("arecord", "aplay", "open_jtalk"):
         if not shutil.which(tool):
             sys.exit(f"{tool} が見つかりません")
-    global GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME
+    global GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME, TTS_PEAK
+    TTS_PEAK = a.tts_peak
     GAIN_TARGET = a.gain
     LEAD_SILENCE = a.lead
     LEAD_LEVEL = a.lead_level
     CHIME = a.chime
     dev = mic_device()
     car = Car(a.move, a.speed, a.seconds)
+    enable_speaker()                                          # Picarx の初期化のあとに入れる（初期化でピンが変わっても上書きする）
     if a.keep:
         os.makedirs(a.keep, exist_ok=True)
     n_utt = 0
