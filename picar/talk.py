@@ -25,6 +25,7 @@ RATE = 16000
 CHUNK = RATE // 10                       # 0.1 秒
 ACTIONS = ["forward", "backward", "left", "right", "stop", "none"]
 GAIN_TARGET = 0.7                        # 送る前にピークをここまで増幅する（0 で増幅しない）
+TTS_RATE = 1.0                           # 読み上げの速さ（Open JTalk の -r。1.0 が標準）
 TTS_PEAK = 0.9                           # 読み上げの声のピークをここまで増幅する（0 で増幅しない）
 CHIME = 0.0                              # 読み上げの前の合図音（ピッ）の長さ（秒）。0 で鳴らさない
 CHIME_LEVEL = 5000                       # 合図音の大きさ（16 ビットで ±5000 ＝ 約 -16dB）
@@ -37,20 +38,24 @@ SYSTEM = (
     "あなたは小さな車型ロボット「ピカ」です。持ち主が声で話しかけてきます。音声認識の結果なので、多少の誤字や言い直しが混ざります。"
     "返事は日本語で、話し言葉で、1〜2 文で短く。記号や絵文字は使わない（読み上げるため）。"
     "体を動かす必要があるときだけ action を選ぶ: forward（前へ）, backward（後ろへ）, left（左へ曲がりながら前へ）, right（右へ曲がりながら前へ）, stop（止まる）。"
-    "動く必要がなければ none。1 回の返事で動作は一つだけ。"
+    "動く必要がなければ none。1 回の返事で動作は一種類だけ。"
+    "times はその動作を繰り返す回数。回数を言われなければ 1。「2 回」「3 回」と言われたらその数。動かないときも 1。"
     "動けと言われたら、そのたびに必ず action を選ぶ。同じ命令を続けて言われても、前に動いたからといって none にしない（体はあなたの返事の action でしか動かない）。"
     "あいさつ、質問、雑談のように、動けと言われていないときは必ず none。迷ったら none。"
     "先に action を決めてから、それに合う say を書く。"
-    'JSON だけで答える: {"action": "<上のどれか>", "say": "<読み上げる文>"}\n'
-    '例: 「前に進んで」→ {"action": "forward", "say": "はい、前に進みます。"}\n'
-    '例: 「こんにちは」→ {"action": "none", "say": "こんにちは。"}\n'
-    '例: 「名前は何ていうの」→ {"action": "none", "say": "ピカです。"}\n'
-    '例: 「止まって」→ {"action": "stop", "say": "はい、止まります。"}'
+    "動くときの say は一言だけ（体は 1 秒で動き終わるので、長い返事は動きに間に合わない）。"
+    'JSON だけで答える: {"action": "<上のどれか>", "times": <回数>, "say": "<読み上げる文>"}\n'
+    '例: 「前に進んで」→ {"action": "forward", "times": 1, "say": "はい、前へ。"}\n'
+    '例: 「左に2回曲がって」→ {"action": "left", "times": 2, "say": "はい、左へ2回。"}\n'
+    '例: 「こんにちは」→ {"action": "none", "times": 1, "say": "こんにちは。"}\n'
+    '例: 「名前は何ていうの」→ {"action": "none", "times": 1, "say": "ピカです。"}\n'
+    '例: 「止まって」→ {"action": "stop", "times": 1, "say": "はい、止まる。"}'
 )
 # action を先に書かせる（返事の文に引っ張られて動作を選ぶのを避ける）
 SCHEMA = {"type": "object",
-          "properties": {"action": {"type": "string", "enum": ACTIONS}, "say": {"type": "string"}},
-          "required": ["action", "say"]}
+          "properties": {"action": {"type": "string", "enum": ACTIONS}, "times": {"type": "integer"}, "say": {"type": "string"}},
+          "required": ["action", "times", "say"]}
+MAX_TIMES = 3                            # 繰り返しの上限。頭が何回と答えても、コードでここまでに縛る
 
 # ---------------------------------------------------------------- 耳: 録音（声が始まってから、黙るまで）
 def rms(samples):
@@ -151,7 +156,7 @@ def listen(dev, thr=None, max_sec=8.0, end_silence=0.8, wait_sec=30.0, verbose=T
     finally:
         p.kill(); p.wait()
 
-def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, no_speech=2.5, max_utt=10.0, verbose=True):
+def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, no_speech=2.5, max_utt=10.0, verbose=True, gate=True):
     """ストリーミング（--asr ws）: 門番が開いたら AmiVoice に WebSocket でつなぎ、マイクの音を流す。
     声の始まり（S）と終わり（E）は AmiVoice のサーバーが決める。自作の「黙ったか」の判定は使わない。
 
@@ -168,10 +173,19 @@ def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, n
     try:
         # ストリーミングでは門番をゆるくする: 声かどうかは AmiVoice が決め、声でなければ課金もされない。
         # 厳しい門番（床の 3 倍・160ms）だと「バックして」のような短く小さい発話で開かなかった
-        g = _gate(p, thr, wait_sec, verbose, factor=2.2, floor_min=150, need=5)
-        if g is None:
-            return None
-        pre, floor, thr_now = g
+        # gate=False（--open-mic）: 門番を使わず、聞き始めたらすぐつないで流し続ける。走った後は雑音の床が上がり、
+        # 門番が雑音で開いて 3 秒つないでは切る、を繰り返し、その切れ目に声が落ちて頭や全体を聞き逃した（実測）。
+        # 課金は AmiVoice が声と判定した区間だけなので、つなぎっぱなしでも無音や雑音のぶんは数えられない
+        if gate:
+            g = _gate(p, thr, wait_sec, verbose, factor=2.2, floor_min=150, need=5)
+            if g is None:
+                return None
+            pre, floor, thr_now = g
+        else:
+            pre, floor, thr_now = [], 0.0, 0.0
+            no_speech = max(no_speech, 25.0)
+            if verbose:
+                print("   (listening… open mic)")
         t_gate = time.time()
         t_audio0 = t_gate - len(pre) * 0.02                # 送る音声の先頭が録られた時刻（おおよそ）
         ws = websocket.create_connection(AMIVOICE_WS, timeout=10)
@@ -225,7 +239,7 @@ def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, n
             now = time.time()
             if t_e is None:
                 # 終わらせる条件: サーバーが声の終わりを知らせた / 声が始まらない / 長すぎる
-                if t_E is not None or (t_S is None and now - t_stream > no_speech) or (now - t_stream > max_utt):
+                if t_E is not None or (t_S is None and now - t_stream > no_speech) or (now - (t_S or t_stream) > max(max_utt, 0 if t_S else no_speech + 1)):
                     ws.send("e"); t_e = now
                 else:
                     c = _read_frame(p)
@@ -341,6 +355,15 @@ def ask_llm(model, history, text, timeout=120):
         ans = {"say": "すみません、うまく考えられませんでした。", "action": "none"}
     if ans.get("action") not in ACTIONS:
         ans["action"] = "none"
+    try:
+        asked = int(ans.get("times", 1))
+    except (TypeError, ValueError):
+        asked = 1
+    ans["times_asked"] = asked                             # 頭が答えた回数（表示・ログ用）
+    ans["times"] = 1 if ans["action"] in ("none", "stop") else max(1, min(MAX_TIMES, asked))
+    if ans["action"] not in ("none", "stop") and asked > MAX_TIMES:
+        # 頭の返事は「10回曲がります」のままなので、体がやることと口が言うことが食い違う。縛ったときは返事もコードで差し替える
+        ans["say"] = f"{MAX_TIMES}回までにします。"
     return ans, wall, content
 
 # ---------------------------------------------------------------- 口: Open JTalk
@@ -365,7 +388,7 @@ def say(text, wav=None):
     # 一時ファイルは利用者ごとに分ける（sudo で一度動かすと root の /tmp/say.wav が残り、通常ユーザーで上書きできなくなる）
     wav = wav or os.path.join(tempfile.gettempdir(), f"smallhands_say_{os.getuid()}.wav")
     t0 = time.time()
-    subprocess.run(["open_jtalk", "-x", DIC, "-m", VOICE, "-ow", wav], input=text.encode(), check=True,
+    subprocess.run(["open_jtalk", "-x", DIC, "-m", VOICE, "-r", str(TTS_RATE), "-ow", wav], input=text.encode(), check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     # 文の頭が切れる件は、アンプが切れていた（GPIO 20 が lo）のと音量が 40% だったのが原因で、enable_speaker() と
     # amixer で直った。無音・小さな雑音・合図音を先頭に足す対策はどれも的外れだった。助走（--lead）と合図音（--chime）は
@@ -405,21 +428,25 @@ class Car:
         if move:
             from picarx import Picarx
             self.px = Picarx()
-    def act(self, action):
+    def act(self, action, times=1):
         if action in ("none", None):
             return 0.0
         t0 = time.time()
+        times = max(1, min(MAX_TIMES, int(times)))         # ここでも縛る（呼び出し側を信用しない）
         if self.px is None:
-            print(f"   (dry run: would {action} for {self.seconds:.1f}s at speed {self.speed})")
+            print(f"   (dry run: would {action} x{times} for {self.seconds:.1f}s each at speed {self.speed})")
             return 0.0
         px = self.px
         try:
             if action == "stop":
                 px.stop()
             else:
-                px.set_dir_servo_angle({"left": -25, "right": 25}.get(action, 0))
-                (px.backward if action == "backward" else px.forward)(self.speed)
-                time.sleep(self.seconds)
+                for k in range(times):
+                    if k:                                  # 回と回のあいだは一度止めて、区切りが見えるようにする
+                        px.stop(); time.sleep(0.3)
+                    px.set_dir_servo_angle({"left": -25, "right": 25}.get(action, 0))
+                    (px.backward if action == "backward" else px.forward)(self.speed)
+                    time.sleep(self.seconds)
         finally:
             px.stop(); px.set_dir_servo_angle(0)
         return time.time() - t0
@@ -443,9 +470,15 @@ def main():
     ap.add_argument("--meter", action="store_true", help="音量計だけ動かす（15 秒。読み上げ → 黙る → 話す、で床と声の差を見る）")
     ap.add_argument("--say-first", action="store_true", help="--meter の前に読み上げを 1 回鳴らす（スピーカーを使ったあとの床を見る）")
     ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
+    ap.add_argument("--tts-rate", type=float, default=1.0, help="読み上げの速さ（1.0 が標準、1.3 で速め）")
     ap.add_argument("--tts-peak", type=float, default=0.9, help="読み上げの声のピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--chime", type=float, default=0.0, help="読み上げの前に鳴らす合図音の秒数（既定は鳴らさない。頭切れの原因はアンプが切れていたことで、合図音は不要だった）")
-    ap.add_argument("--lead", type=float, default=0.25, help="合図音と文の間の秒数")
+    ap.add_argument("--max-times", type=int, default=3, help="繰り返しの上限（頭が何回と答えても、ここまで）")
+    ap.add_argument("--gate", action="store_true", help="以前の方式: 自作の門番が開いたときだけ AmiVoice につなぐ（既定は、聞いている間ずっとつないでおく）")
+    ap.add_argument("--open-mic", action="store_true", help="（既定になったので指定不要。互換のために残してある）")
+    ap.add_argument("--no-lead", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--act-after-say", action="store_true", help="以前の順番（読み上げが終わってから動く）に戻す")
+    ap.add_argument("--lead", type=float, default=0.0, help="合図音と文の間の秒数")
     ap.add_argument("--lead-level", type=int, default=100, help="その間をつなぐ雑音の大きさ（0 で完全な無音）")
     ap.add_argument("--history", type=int, default=0, help="モデルに見せる過去のやりとりの数（往復）。0 だと毎回その一言だけで判断する")
     ap.add_argument("--keep", default="logs/talk_wavs", help="送った音声を残すディレクトリ（'' で残さない）。棄却された声を後で調べるため")
@@ -455,7 +488,9 @@ def main():
     for tool in ("arecord", "aplay", "open_jtalk"):
         if not shutil.which(tool):
             sys.exit(f"{tool} が見つかりません")
-    global GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME, TTS_PEAK
+    global MAX_TIMES, GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME, TTS_PEAK, TTS_RATE
+    TTS_RATE = a.tts_rate
+    MAX_TIMES = max(1, a.max_times)
     TTS_PEAK = a.tts_peak
     GAIN_TARGET = a.gain
     LEAD_SILENCE = a.lead
@@ -523,7 +558,7 @@ def main():
                 detail = f"endpoint wait {LAST.get('endwait', 0.0):.1f}s + http {t_http:.2f}s, recorded {speech:.1f}s"
             else:
                 try:
-                    got = listen_stream(dev, thr=a.thr or None, gain=a.stream_gain)
+                    got = listen_stream(dev, thr=a.thr or None, gain=a.stream_gain, gate=a.gate)
                 except Exception as e:
                     print(f"   !! {e}"); time.sleep(1); continue
                 if got is None:
@@ -578,12 +613,25 @@ def main():
                 print(f"   !! 頭に届きません: {e}")
                 say("すみません、いま考えられません。")
                 continue
-            print(f"[think] llm {t_llm:.2f}s -> say {ans['say']!r}  action {ans['action']}")
-            t_syn, t_play = say(ans["say"])
-            t_act = car.act(ans["action"])
-            print(f"[done]  tts synth {t_syn:.2f}s play {t_play:.2f}s | act {t_act:.2f}s | 声の終わりから返事の出だしまで {t_asr + t_llm + t_syn + CHIME + LEAD_SILENCE:.2f}s")
+            print(f"[think] llm {t_llm:.2f}s -> say {ans['say']!r}  action {ans['action']}"
+                  + (f" x{ans['times']}" + (f"（頭の答えは {ans['times_asked']} 回、上限 {MAX_TIMES}）" if ans['times_asked'] != ans['times'] else "") if ans['action'] not in ("none", "stop") and (ans['times'] > 1 or ans['times_asked'] != ans['times']) else ""))
+            # 動作は返事の読み上げと同時に始める。以前は読み上げ（約 3 秒）が終わってから動かしていたので、
+            # 声の終わりから動き出しまでが 6 秒近くあった（表示していた「返事の出だしまで」には入っていなかった）
+            if a.act_after_say:
+                t_syn, t_play = say(ans["say"])
+                t_act = car.act(ans["action"], ans["times"])
+                t_move = t_asr + t_llm + t_syn + CHIME + LEAD_SILENCE + t_play + 0.4
+            else:
+                box = {}
+                th = threading.Thread(target=lambda: box.update(t=car.act(ans["action"], ans["times"])), daemon=True)
+                th.start()
+                t_syn, t_play = say(ans["say"])
+                th.join(); t_act = box.get("t", 0.0)
+                t_move = t_asr + t_llm
+            print(f"[done]  tts synth {t_syn:.2f}s play {t_play:.2f}s | act {t_act:.2f}s | 声の終わりから返事の出だしまで {t_asr + t_llm + t_syn + CHIME + LEAD_SILENCE:.2f}s"
+                  + (f"、動き出しまで {t_move:.2f}s" if ans["action"] != "none" else ""))
             log.writerow([time.time(), a.model, a.asr, f"{speech:.2f}", f"{t_asr:.3f}", f"{t_llm:.3f}", f"{t_syn:.3f}", f"{t_play:.3f}", f"{t_act:.3f}",
-                          heard, json.dumps(dropped, ensure_ascii=False), ans["say"], ans["action"]]); logf.flush()
+                          heard, json.dumps(dropped, ensure_ascii=False), ans["say"], ans["action"] + (f" x{ans['times']}" if ans["times"] > 1 else "")]); logf.flush()
             history += [{"role": "user", "content": heard}, {"role": "assistant", "content": json.dumps(ans, ensure_ascii=False)}]
             if a.wav:
                 break
