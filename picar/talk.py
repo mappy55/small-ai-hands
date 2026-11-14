@@ -25,6 +25,7 @@ RATE = 16000
 CHUNK = RATE // 10                       # 0.1 秒
 ACTIONS = ["forward", "backward", "left", "right", "stop", "none"]
 GAIN_TARGET = 0.7                        # 送る前にピークをここまで増幅する（0 で増幅しない）
+TTS_RATE = 1.0                           # 読み上げの速さ（Open JTalk の -r。1.0 が標準）
 TTS_PEAK = 0.9                           # 読み上げの声のピークをここまで増幅する（0 で増幅しない）
 CHIME = 0.0                              # 読み上げの前の合図音（ピッ）の長さ（秒）。0 で鳴らさない
 CHIME_LEVEL = 5000                       # 合図音の大きさ（16 ビットで ±5000 ＝ 約 -16dB）
@@ -41,11 +42,12 @@ SYSTEM = (
     "動けと言われたら、そのたびに必ず action を選ぶ。同じ命令を続けて言われても、前に動いたからといって none にしない（体はあなたの返事の action でしか動かない）。"
     "あいさつ、質問、雑談のように、動けと言われていないときは必ず none。迷ったら none。"
     "先に action を決めてから、それに合う say を書く。"
+    "動くときの say は一言だけ（体は 1 秒で動き終わるので、長い返事は動きに間に合わない）。"
     'JSON だけで答える: {"action": "<上のどれか>", "say": "<読み上げる文>"}\n'
-    '例: 「前に進んで」→ {"action": "forward", "say": "はい、前に進みます。"}\n'
+    '例: 「前に進んで」→ {"action": "forward", "say": "はい、前へ。"}\n'
     '例: 「こんにちは」→ {"action": "none", "say": "こんにちは。"}\n'
     '例: 「名前は何ていうの」→ {"action": "none", "say": "ピカです。"}\n'
-    '例: 「止まって」→ {"action": "stop", "say": "はい、止まります。"}'
+    '例: 「止まって」→ {"action": "stop", "say": "はい、止まる。"}'
 )
 # action を先に書かせる（返事の文に引っ張られて動作を選ぶのを避ける）
 SCHEMA = {"type": "object",
@@ -365,7 +367,7 @@ def say(text, wav=None):
     # 一時ファイルは利用者ごとに分ける（sudo で一度動かすと root の /tmp/say.wav が残り、通常ユーザーで上書きできなくなる）
     wav = wav or os.path.join(tempfile.gettempdir(), f"smallhands_say_{os.getuid()}.wav")
     t0 = time.time()
-    subprocess.run(["open_jtalk", "-x", DIC, "-m", VOICE, "-ow", wav], input=text.encode(), check=True,
+    subprocess.run(["open_jtalk", "-x", DIC, "-m", VOICE, "-r", str(TTS_RATE), "-ow", wav], input=text.encode(), check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
     # 文の頭が切れる件は、アンプが切れていた（GPIO 20 が lo）のと音量が 40% だったのが原因で、enable_speaker() と
     # amixer で直った。無音・小さな雑音・合図音を先頭に足す対策はどれも的外れだった。助走（--lead）と合図音（--chime）は
@@ -443,6 +445,7 @@ def main():
     ap.add_argument("--meter", action="store_true", help="音量計だけ動かす（15 秒。読み上げ → 黙る → 話す、で床と声の差を見る）")
     ap.add_argument("--say-first", action="store_true", help="--meter の前に読み上げを 1 回鳴らす（スピーカーを使ったあとの床を見る）")
     ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
+    ap.add_argument("--tts-rate", type=float, default=1.0, help="読み上げの速さ（1.0 が標準、1.3 で速め）")
     ap.add_argument("--tts-peak", type=float, default=0.9, help="読み上げの声のピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--chime", type=float, default=0.0, help="読み上げの前に鳴らす合図音の秒数（既定は鳴らさない。頭切れの原因はアンプが切れていたことで、合図音は不要だった）")
     ap.add_argument("--act-after-say", action="store_true", help="以前の順番（読み上げが終わってから動く）に戻す")
@@ -456,7 +459,8 @@ def main():
     for tool in ("arecord", "aplay", "open_jtalk"):
         if not shutil.which(tool):
             sys.exit(f"{tool} が見つかりません")
-    global GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME, TTS_PEAK
+    global GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME, TTS_PEAK, TTS_RATE
+    TTS_RATE = a.tts_rate
     TTS_PEAK = a.tts_peak
     GAIN_TARGET = a.gain
     LEAD_SILENCE = a.lead
