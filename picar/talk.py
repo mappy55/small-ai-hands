@@ -361,6 +361,9 @@ def ask_llm(model, history, text, timeout=120):
         asked = 1
     ans["times_asked"] = asked                             # 頭が答えた回数（表示・ログ用）
     ans["times"] = 1 if ans["action"] in ("none", "stop") else max(1, min(MAX_TIMES, asked))
+    if ans["action"] not in ("none", "stop") and asked > MAX_TIMES:
+        # 頭の返事は「10回曲がります」のままなので、体がやることと口が言うことが食い違う。縛ったときは返事もコードで差し替える
+        ans["say"] = f"{MAX_TIMES}回までにします。"
     return ans, wall, content
 
 # ---------------------------------------------------------------- 口: Open JTalk
