@@ -445,6 +445,7 @@ def main():
     ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--tts-peak", type=float, default=0.9, help="読み上げの声のピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--chime", type=float, default=0.0, help="読み上げの前に鳴らす合図音の秒数（既定は鳴らさない。頭切れの原因はアンプが切れていたことで、合図音は不要だった）")
+    ap.add_argument("--act-after-say", action="store_true", help="以前の順番（読み上げが終わってから動く）に戻す")
     ap.add_argument("--lead", type=float, default=0.25, help="合図音と文の間の秒数")
     ap.add_argument("--lead-level", type=int, default=100, help="その間をつなぐ雑音の大きさ（0 で完全な無音）")
     ap.add_argument("--history", type=int, default=0, help="モデルに見せる過去のやりとりの数（往復）。0 だと毎回その一言だけで判断する")
@@ -579,9 +580,21 @@ def main():
                 say("すみません、いま考えられません。")
                 continue
             print(f"[think] llm {t_llm:.2f}s -> say {ans['say']!r}  action {ans['action']}")
-            t_syn, t_play = say(ans["say"])
-            t_act = car.act(ans["action"])
-            print(f"[done]  tts synth {t_syn:.2f}s play {t_play:.2f}s | act {t_act:.2f}s | 声の終わりから返事の出だしまで {t_asr + t_llm + t_syn + CHIME + LEAD_SILENCE:.2f}s")
+            # 動作は返事の読み上げと同時に始める。以前は読み上げ（約 3 秒）が終わってから動かしていたので、
+            # 声の終わりから動き出しまでが 6 秒近くあった（表示していた「返事の出だしまで」には入っていなかった）
+            if a.act_after_say:
+                t_syn, t_play = say(ans["say"])
+                t_act = car.act(ans["action"])
+                t_move = t_asr + t_llm + t_syn + CHIME + LEAD_SILENCE + t_play + 0.4
+            else:
+                box = {}
+                th = threading.Thread(target=lambda: box.update(t=car.act(ans["action"])), daemon=True)
+                th.start()
+                t_syn, t_play = say(ans["say"])
+                th.join(); t_act = box.get("t", 0.0)
+                t_move = t_asr + t_llm
+            print(f"[done]  tts synth {t_syn:.2f}s play {t_play:.2f}s | act {t_act:.2f}s | 声の終わりから返事の出だしまで {t_asr + t_llm + t_syn + CHIME + LEAD_SILENCE:.2f}s"
+                  + (f"、動き出しまで {t_move:.2f}s" if ans["action"] != "none" else ""))
             log.writerow([time.time(), a.model, a.asr, f"{speech:.2f}", f"{t_asr:.3f}", f"{t_llm:.3f}", f"{t_syn:.3f}", f"{t_play:.3f}", f"{t_act:.3f}",
                           heard, json.dumps(dropped, ensure_ascii=False), ans["say"], ans["action"]]); logf.flush()
             history += [{"role": "user", "content": heard}, {"role": "assistant", "content": json.dumps(ans, ensure_ascii=False)}]
