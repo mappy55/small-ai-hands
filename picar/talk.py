@@ -26,7 +26,7 @@ CHUNK = RATE // 10                       # 0.1 秒
 ACTIONS = ["forward", "backward", "left", "right", "stop", "none"]
 GAIN_TARGET = 0.7                        # 送る前にピークをここまで増幅する（0 で増幅しない）
 TTS_PEAK = 0.9                           # 読み上げの声のピークをここまで増幅する（0 で増幅しない）
-CHIME = 0.15                             # 読み上げの前の合図音（ピッ）の長さ（秒）。0 で鳴らさない
+CHIME = 0.0                              # 読み上げの前の合図音（ピッ）の長さ（秒）。0 で鳴らさない
 CHIME_LEVEL = 5000                       # 合図音の大きさ（16 ビットで ±5000 ＝ 約 -16dB）
 LEAD_SILENCE = 0.25                      # 合図音と文の間（秒）
 LEAD_LEVEL = 100                         # その間をつなぐ雑音の大きさ（±100 ＝ 約 -50dB。0 だと完全な無音）
@@ -356,9 +356,9 @@ def say(text, wav=None):
     t0 = time.time()
     subprocess.run(["open_jtalk", "-x", DIC, "-m", VOICE, "-ow", wav], input=text.encode(), check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-    # 文の頭が切れる対策。先頭に完全な無音（0）を足しても、聞こえないほど小さな雑音（±12）を足しても、最初の一音が欠けた。
-    # アンプは「ある程度の大きさの音」が来てから立ち上がるらしいので、文の前に短い合図音（ピッ）を鳴らして起こしておく。
-    # 合図音の頭が欠けても困らないし、「これから話す」の合図にもなる。そのあと小さな雑音でつないで、文に入る。
+    # 文の頭が切れる件は、アンプが切れていた（GPIO 20 が lo）のと音量が 40% だったのが原因で、enable_speaker() と
+    # amixer で直った。無音・小さな雑音・合図音を先頭に足す対策はどれも的外れだった。助走（--lead）と合図音（--chime）は
+    # 残してあるが、合図音は既定で鳴らさない。
     if LEAD_SILENCE > 0 or CHIME > 0:
         import random, math
         with wave.open(wav, "rb") as w:
@@ -433,7 +433,7 @@ def main():
     ap.add_argument("--say-first", action="store_true", help="--meter の前に読み上げを 1 回鳴らす（スピーカーを使ったあとの床を見る）")
     ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--tts-peak", type=float, default=0.9, help="読み上げの声のピークをこの割合まで増幅する（0 で増幅しない）")
-    ap.add_argument("--chime", type=float, default=0.15, help="読み上げの前に鳴らす合図音の秒数（アンプを起こして文の頭が切れるのを防ぐ。0 で鳴らさない）")
+    ap.add_argument("--chime", type=float, default=0.0, help="読み上げの前に鳴らす合図音の秒数（既定は鳴らさない。頭切れの原因はアンプが切れていたことで、合図音は不要だった）")
     ap.add_argument("--lead", type=float, default=0.25, help="合図音と文の間の秒数")
     ap.add_argument("--lead-level", type=int, default=100, help="その間をつなぐ雑音の大きさ（0 で完全な無音）")
     ap.add_argument("--history", type=int, default=0, help="モデルに見せる過去のやりとりの数（往復）。0 だと毎回その一言だけで判断する")
