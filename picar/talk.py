@@ -686,6 +686,7 @@ def main():
     ap.set_defaults(code=True)
     ap.add_argument("--no-memo", dest="memo", action="store_false", help="頭の答えを控えない（毎回頭に聞く）")
     ap.add_argument("--memo-file", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "head_memo.json"))
+    ap.add_argument("--listen-only", action="store_true", help="聞き取りの実験用: 認識結果を表示して数えるだけ（頭・返事・動作なし）。Ctrl+C で終了し、集計を表示")
     ap.add_argument("--wake", default="", help="呼びかけの言葉（例: ピカ）。指定すると、この言葉が入った文だけを相手にする")
     ap.add_argument("--wake-alias", default="PIKA", help="呼びかけの別の書かれ方（カンマ区切り）。認識結果にこの形で出ても呼びかけとして扱う")
     ap.add_argument("--wake-window", type=float, default=0.0, help="返事をしてからこの秒数は、呼びかけなしでも受け付ける（0 で毎回呼びかけが必要）")
@@ -720,7 +721,7 @@ def main():
     enable_speaker()                                          # Picarx の初期化のあとに入れる（初期化でピンが変わっても上書きする）
     if a.keep:
         os.makedirs(a.keep, exist_ok=True)
-    n_utt = 0; spec = None; wake_until = 0.0
+    n_utt = 0; spec = None; wake_until = 0.0; tally = {}
     memo = Memo(a.memo_file, a.model) if (a.memo and a.history == 0) else None
     if a.meter:
         if a.say_first:
@@ -812,6 +813,7 @@ def main():
             lvl = f"speech {speech:.1f}s, peak {LAST['peak']*100:.0f}% x{LAST['gain']:.1f}, floor {LAST.get('floor', 0):.0f}; {detail}"
             if text is None:
                 print(f"[heard] (rejected by AmiVoice: confidence too low)  heard in {t_asr:.2f}s ({lvl})")
+                tally["（棄却）"] = tally.get("（棄却）", 0) + 1
                 log.writerow([time.time(), a.model, a.asr, f"{speech:.2f}", f"{t_asr:.3f}", 0, 0, 0, 0, "(rejected)", "", "", ""]); logf.flush()
                 if a.wav:
                     break
@@ -824,6 +826,9 @@ def main():
             if got is not None and got.get("interim") and got.get("t_A"):
                 # 途中経過の移り変わり（確定の何秒前に、どの文になったか）
                 print("        interim: " + " | ".join(f"{tm - got['t_A']:+.2f}s {u!r}" for tm, u in got["interim"][-6:]))
+            if a.listen_only:                              # 聞き取りの実験用: 頭にも聞かず、返事も動作もしない。結果を数えるだけ
+                tally[text] = tally.get(text, 0) + 1
+                continue
             # 呼びかけ（--wake）: つなぎっぱなしだと、ロボットに向けていない会話も全部聞こえる。
             # 呼びかけの言葉が入った文だけを相手にし、それ以外は頭にも送らず、返事もしない
             if a.wake:
@@ -916,6 +921,10 @@ def main():
         print("\n== bye")
     finally:
         car.close(); logf.close()
+        if a.listen_only and tally:
+            print("== 聞き取りの集計（多い順）")
+            for k, v in sorted(tally.items(), key=lambda kv: -kv[1]):
+                print(f"   {v:3d} 回  {k}")
         # 声として数えられた秒数（認識結果の開始〜終了の合計）。汎用・ログ保存なしの単価 0.04125 円/秒で概算（無料枠・クーポンを引く前）
         print(f"== AmiVoice が声として数えた秒数（概算）: {BILLED['s']:.1f}s ≒ {BILLED['s'] * 0.04125:.2f} 円")
 
