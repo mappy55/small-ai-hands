@@ -196,6 +196,7 @@ def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, n
         if (r or "").strip() != "s":
             raise RuntimeError(f"AmiVoice: {r}")
         t_conn = time.time() - t_gate
+        LED.set("listen")
         q = queue.Queue()
         def reader():
             try:
@@ -224,9 +225,9 @@ def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, n
                         closed = True; break
                     ev, body = m[:1], m[2:]
                     if ev == "S" and t_S is None:
-                        t_S = tm
+                        t_S = tm; LED.set("voice")
                     elif ev == "E" and t_E is None:
-                        t_E = tm
+                        t_E = tm; LED.set("think")
                     elif ev == "U":
                         # 認識の途中経過。0.1 秒ごとに届き、変化がないときは前の文の末尾に「.」が足される
                         try:
@@ -275,6 +276,8 @@ def listen_stream(dev, thr=None, gain=5.0, engine="-a-general", wait_sec=30.0, n
             info["result"] = result
         return info
     finally:
+        if LED.mode != "think":
+            LED.set("off")
         p.kill(); p.wait()
         if ws is not None:
             try:
@@ -617,12 +620,47 @@ def say(text, wav=None):
             with wave.open(wav, "wb") as w:
                 w.setparams(params); w.writeframes(lead.tobytes() + frames)
     t1 = time.time()
+    LED.set("off")
     subprocess.run(["aplay", "-q", wav], check=False, timeout=60)
     t2 = time.time()
     time.sleep(0.4)                          # スピーカーの残響が消えるのを待ってから聞き始める
     return t1 - t0, t2 - t1
 
 # ---------------------------------------------------------------- 手足: picarx
+class Led:
+    """耳の状態を外から見えるようにする。Robot HAT の基板に付いている LED を使う（部品の追加なし）。
+      listen = 点灯（聞いている） / voice = 速い点滅（声を検出した） / think = ゆっくり点滅（考えている） / off = 消灯（話している・動いている）
+    LED が使えない環境では何もしない"""
+    def __init__(self, enable=True, pin="LED"):
+        self.pin = None; self.mode = "off"; self._stop = False
+        if enable:
+            try:
+                from robot_hat import Pin
+                self.pin = Pin(pin)
+                threading.Thread(target=self._run, daemon=True).start()
+            except Exception as e:
+                print(f"   (LED は使えません: {e})")
+    def set(self, mode):
+        self.mode = mode
+    def _write(self, on):
+        try:
+            (self.pin.on if on else self.pin.off)()
+        except Exception:
+            self.pin = None
+    def _run(self):
+        t = 0
+        while not self._stop and self.pin is not None:
+            m = self.mode
+            on = {"listen": True, "voice": t % 2 == 0, "think": (t // 5) % 2 == 0}.get(m, False)
+            self._write(on)
+            time.sleep(0.05); t += 1
+    def close(self):
+        self._stop = True; time.sleep(0.1)
+        if self.pin is not None:
+            self._write(False)
+
+LED = Led(False)                          # main で作り直す
+
 class Car:
     """--move のときだけ本物を動かす。動作は種類・速さ・時間をコードで制限する（LLM には決めさせない）"""
     def __init__(self, move, speed=30, seconds=1.0):
@@ -686,6 +724,7 @@ def main():
     ap.set_defaults(code=True)
     ap.add_argument("--no-memo", dest="memo", action="store_false", help="頭の答えを控えない（毎回頭に聞く）")
     ap.add_argument("--memo-file", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "head_memo.json"))
+    ap.add_argument("--no-led", action="store_true", help="基板の LED で耳の状態を示すのをやめる")
     ap.add_argument("--listen-only", action="store_true", help="聞き取りの実験用: 認識結果を表示して数えるだけ（頭・返事・動作なし）。Ctrl+C で終了し、集計を表示")
     ap.add_argument("--wake", default="", help="呼びかけの言葉（例: ピカ）。指定すると、この言葉が入った文だけを相手にする")
     ap.add_argument("--wake-alias", default="PIKA", help="呼びかけの別の書かれ方（カンマ区切り）。認識結果にこの形で出ても呼びかけとして扱う")
@@ -707,9 +746,10 @@ def main():
     for tool in ("arecord", "aplay", "open_jtalk"):
         if not shutil.which(tool):
             sys.exit(f"{tool} が見つかりません")
-    global HEAD_CODE, MAX_TIMES, GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME, TTS_PEAK, TTS_RATE
+    global LED, HEAD_CODE, MAX_TIMES, GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME, TTS_PEAK, TTS_RATE
     TTS_RATE = a.tts_rate
     HEAD_CODE = a.code
+    LED = Led(not a.no_led)
     MAX_TIMES = max(1, a.max_times)
     TTS_PEAK = a.tts_peak
     GAIN_TARGET = a.gain
@@ -920,7 +960,7 @@ def main():
     except KeyboardInterrupt:
         print("\n== bye")
     finally:
-        car.close(); logf.close()
+        car.close(); logf.close(); LED.close()
         if a.listen_only and tally:
             print("== 聞き取りの集計（多い順）")
             for k, v in sorted(tally.items(), key=lambda kv: -kv[1]):
