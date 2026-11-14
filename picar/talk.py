@@ -38,21 +38,24 @@ SYSTEM = (
     "あなたは小さな車型ロボット「ピカ」です。持ち主が声で話しかけてきます。音声認識の結果なので、多少の誤字や言い直しが混ざります。"
     "返事は日本語で、話し言葉で、1〜2 文で短く。記号や絵文字は使わない（読み上げるため）。"
     "体を動かす必要があるときだけ action を選ぶ: forward（前へ）, backward（後ろへ）, left（左へ曲がりながら前へ）, right（右へ曲がりながら前へ）, stop（止まる）。"
-    "動く必要がなければ none。1 回の返事で動作は一つだけ。"
+    "動く必要がなければ none。1 回の返事で動作は一種類だけ。"
+    "times はその動作を繰り返す回数。回数を言われなければ 1。「2 回」「3 回」と言われたらその数。動かないときも 1。"
     "動けと言われたら、そのたびに必ず action を選ぶ。同じ命令を続けて言われても、前に動いたからといって none にしない（体はあなたの返事の action でしか動かない）。"
     "あいさつ、質問、雑談のように、動けと言われていないときは必ず none。迷ったら none。"
     "先に action を決めてから、それに合う say を書く。"
     "動くときの say は一言だけ（体は 1 秒で動き終わるので、長い返事は動きに間に合わない）。"
-    'JSON だけで答える: {"action": "<上のどれか>", "say": "<読み上げる文>"}\n'
-    '例: 「前に進んで」→ {"action": "forward", "say": "はい、前へ。"}\n'
-    '例: 「こんにちは」→ {"action": "none", "say": "こんにちは。"}\n'
-    '例: 「名前は何ていうの」→ {"action": "none", "say": "ピカです。"}\n'
-    '例: 「止まって」→ {"action": "stop", "say": "はい、止まる。"}'
+    'JSON だけで答える: {"action": "<上のどれか>", "times": <回数>, "say": "<読み上げる文>"}\n'
+    '例: 「前に進んで」→ {"action": "forward", "times": 1, "say": "はい、前へ。"}\n'
+    '例: 「左に2回曲がって」→ {"action": "left", "times": 2, "say": "はい、左へ2回。"}\n'
+    '例: 「こんにちは」→ {"action": "none", "times": 1, "say": "こんにちは。"}\n'
+    '例: 「名前は何ていうの」→ {"action": "none", "times": 1, "say": "ピカです。"}\n'
+    '例: 「止まって」→ {"action": "stop", "times": 1, "say": "はい、止まる。"}'
 )
 # action を先に書かせる（返事の文に引っ張られて動作を選ぶのを避ける）
 SCHEMA = {"type": "object",
-          "properties": {"action": {"type": "string", "enum": ACTIONS}, "say": {"type": "string"}},
-          "required": ["action", "say"]}
+          "properties": {"action": {"type": "string", "enum": ACTIONS}, "times": {"type": "integer"}, "say": {"type": "string"}},
+          "required": ["action", "times", "say"]}
+MAX_TIMES = 3                            # 繰り返しの上限。頭が何回と答えても、コードでここまでに縛る
 
 # ---------------------------------------------------------------- 耳: 録音（声が始まってから、黙るまで）
 def rms(samples):
@@ -352,6 +355,12 @@ def ask_llm(model, history, text, timeout=120):
         ans = {"say": "すみません、うまく考えられませんでした。", "action": "none"}
     if ans.get("action") not in ACTIONS:
         ans["action"] = "none"
+    try:
+        asked = int(ans.get("times", 1))
+    except (TypeError, ValueError):
+        asked = 1
+    ans["times_asked"] = asked                             # 頭が答えた回数（表示・ログ用）
+    ans["times"] = 1 if ans["action"] in ("none", "stop") else max(1, min(MAX_TIMES, asked))
     return ans, wall, content
 
 # ---------------------------------------------------------------- 口: Open JTalk
@@ -416,21 +425,25 @@ class Car:
         if move:
             from picarx import Picarx
             self.px = Picarx()
-    def act(self, action):
+    def act(self, action, times=1):
         if action in ("none", None):
             return 0.0
         t0 = time.time()
+        times = max(1, min(MAX_TIMES, int(times)))         # ここでも縛る（呼び出し側を信用しない）
         if self.px is None:
-            print(f"   (dry run: would {action} for {self.seconds:.1f}s at speed {self.speed})")
+            print(f"   (dry run: would {action} x{times} for {self.seconds:.1f}s each at speed {self.speed})")
             return 0.0
         px = self.px
         try:
             if action == "stop":
                 px.stop()
             else:
-                px.set_dir_servo_angle({"left": -25, "right": 25}.get(action, 0))
-                (px.backward if action == "backward" else px.forward)(self.speed)
-                time.sleep(self.seconds)
+                for k in range(times):
+                    if k:                                  # 回と回のあいだは一度止めて、区切りが見えるようにする
+                        px.stop(); time.sleep(0.3)
+                    px.set_dir_servo_angle({"left": -25, "right": 25}.get(action, 0))
+                    (px.backward if action == "backward" else px.forward)(self.speed)
+                    time.sleep(self.seconds)
         finally:
             px.stop(); px.set_dir_servo_angle(0)
         return time.time() - t0
@@ -457,6 +470,7 @@ def main():
     ap.add_argument("--tts-rate", type=float, default=1.0, help="読み上げの速さ（1.0 が標準、1.3 で速め）")
     ap.add_argument("--tts-peak", type=float, default=0.9, help="読み上げの声のピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--chime", type=float, default=0.0, help="読み上げの前に鳴らす合図音の秒数（既定は鳴らさない。頭切れの原因はアンプが切れていたことで、合図音は不要だった）")
+    ap.add_argument("--max-times", type=int, default=3, help="繰り返しの上限（頭が何回と答えても、ここまで）")
     ap.add_argument("--gate", action="store_true", help="以前の方式: 自作の門番が開いたときだけ AmiVoice につなぐ（既定は、聞いている間ずっとつないでおく）")
     ap.add_argument("--open-mic", action="store_true", help="（既定になったので指定不要。互換のために残してある）")
     ap.add_argument("--no-lead", action="store_true", help=argparse.SUPPRESS)
@@ -471,8 +485,9 @@ def main():
     for tool in ("arecord", "aplay", "open_jtalk"):
         if not shutil.which(tool):
             sys.exit(f"{tool} が見つかりません")
-    global GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME, TTS_PEAK, TTS_RATE
+    global MAX_TIMES, GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME, TTS_PEAK, TTS_RATE
     TTS_RATE = a.tts_rate
+    MAX_TIMES = max(1, a.max_times)
     TTS_PEAK = a.tts_peak
     GAIN_TARGET = a.gain
     LEAD_SILENCE = a.lead
@@ -595,16 +610,17 @@ def main():
                 print(f"   !! 頭に届きません: {e}")
                 say("すみません、いま考えられません。")
                 continue
-            print(f"[think] llm {t_llm:.2f}s -> say {ans['say']!r}  action {ans['action']}")
+            print(f"[think] llm {t_llm:.2f}s -> say {ans['say']!r}  action {ans['action']}"
+                  + (f" x{ans['times']}" + (f"（頭の答えは {ans['times_asked']} 回、上限 {MAX_TIMES}）" if ans['times_asked'] != ans['times'] else "") if ans['action'] not in ("none", "stop") and (ans['times'] > 1 or ans['times_asked'] != ans['times']) else ""))
             # 動作は返事の読み上げと同時に始める。以前は読み上げ（約 3 秒）が終わってから動かしていたので、
             # 声の終わりから動き出しまでが 6 秒近くあった（表示していた「返事の出だしまで」には入っていなかった）
             if a.act_after_say:
                 t_syn, t_play = say(ans["say"])
-                t_act = car.act(ans["action"])
+                t_act = car.act(ans["action"], ans["times"])
                 t_move = t_asr + t_llm + t_syn + CHIME + LEAD_SILENCE + t_play + 0.4
             else:
                 box = {}
-                th = threading.Thread(target=lambda: box.update(t=car.act(ans["action"])), daemon=True)
+                th = threading.Thread(target=lambda: box.update(t=car.act(ans["action"], ans["times"])), daemon=True)
                 th.start()
                 t_syn, t_play = say(ans["say"])
                 th.join(); t_act = box.get("t", 0.0)
@@ -612,7 +628,7 @@ def main():
             print(f"[done]  tts synth {t_syn:.2f}s play {t_play:.2f}s | act {t_act:.2f}s | 声の終わりから返事の出だしまで {t_asr + t_llm + t_syn + CHIME + LEAD_SILENCE:.2f}s"
                   + (f"、動き出しまで {t_move:.2f}s" if ans["action"] != "none" else ""))
             log.writerow([time.time(), a.model, a.asr, f"{speech:.2f}", f"{t_asr:.3f}", f"{t_llm:.3f}", f"{t_syn:.3f}", f"{t_play:.3f}", f"{t_act:.3f}",
-                          heard, json.dumps(dropped, ensure_ascii=False), ans["say"], ans["action"]]); logf.flush()
+                          heard, json.dumps(dropped, ensure_ascii=False), ans["say"], ans["action"] + (f" x{ans['times']}" if ans["times"] > 1 else "")]); logf.flush()
             history += [{"role": "user", "content": heard}, {"role": "assistant", "content": json.dumps(ans, ensure_ascii=False)}]
             if a.wav:
                 break
