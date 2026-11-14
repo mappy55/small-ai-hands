@@ -340,30 +340,65 @@ def low_tokens(tokens, min_conf):
     return [(w, round(c, 2)) for w, c in tokens if c < min_conf]
 
 # ---------------------------------------------------------------- 頭: ノート PC の Ollama
-def ask_llm(model, history, text, timeout=120):
+def _clamp(action, asked):
+    """頭の答え（動作・回数）をコードで縛る。戻り値: (動作, 実際の回数, 頭が答えた回数)"""
+    if action not in ACTIONS:
+        action = "none"
+    try:
+        asked = int(asked)
+    except (TypeError, ValueError):
+        asked = 1
+    return action, (1 if action in ("none", "stop") else max(1, min(MAX_TIMES, asked))), asked
+
+import re
+_EARLY = re.compile(r'"action"\s*:\s*"([a-z_]+)"\s*,\s*"times"\s*:\s*(-?\d+)\s*[,}]')
+
+def early_action(partial):
+    """出力の途中（JSON の書きかけ）から、動作と回数が確定していれば取り出す。まだなら None。
+    回数は次の区切り（, か }）が来るまで待つ（"1" の後に "0" が続いて 10 になるかもしれないので）"""
+    m = _EARLY.search(partial)
+    return (m.group(1), int(m.group(2))) if m else None
+
+def ask_llm(model, history, text, timeout=120, on_early=None):
+    """頭に聞く。戻り値: (答え, かかった秒数, 生の出力)
+    on_early(action, times, 経過秒) を渡すと、答えを少しずつ受け取り、動作と回数が出た時点で一度だけ呼ぶ
+    （返事の文ができあがるのを待たずに体を動かすため）。呼んだ時刻は答えの t_early に入る"""
     msgs = [{"role": "system", "content": SYSTEM}] + history + [{"role": "user", "content": text}]
-    body = {"model": model, "stream": False, "format": SCHEMA, "options": {"temperature": 0, "num_ctx": 4096}, "messages": msgs}
+    stream = on_early is not None
+    body = {"model": model, "stream": stream, "format": SCHEMA, "options": {"temperature": 0, "num_ctx": 4096}, "messages": msgs}
     req = urllib.request.Request(f"{OLLAMA}/api/chat", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-    t0 = time.time()
+    t0 = time.time(); t_early = None; early = None
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        r = json.loads(resp.read())
+        if not stream:
+            content = json.loads(resp.read()).get("message", {}).get("content", "")
+        else:
+            content = ""
+            for line in resp:                              # 1 行に 1 つの JSON（書きかけの答えのかけら）
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                content += r.get("message", {}).get("content", "")
+                if early is None:
+                    e = early_action(content)
+                    if e is not None:
+                        act, times, _ = _clamp(*e)
+                        early = (act, times); t_early = time.time() - t0
+                        on_early(act, times, t_early)
+                if r.get("done"):
+                    break
     wall = time.time() - t0
-    content = r.get("message", {}).get("content", "")
     try:
         ans = json.loads(content)
     except json.JSONDecodeError:
         ans = {"say": "すみません、うまく考えられませんでした。", "action": "none"}
-    if ans.get("action") not in ACTIONS:
-        ans["action"] = "none"
-    try:
-        asked = int(ans.get("times", 1))
-    except (TypeError, ValueError):
-        asked = 1
-    ans["times_asked"] = asked                             # 頭が答えた回数（表示・ログ用）
-    ans["times"] = 1 if ans["action"] in ("none", "stop") else max(1, min(MAX_TIMES, asked))
-    if ans["action"] not in ("none", "stop") and asked > MAX_TIMES:
+    ans["action"], ans["times"], ans["times_asked"] = _clamp(ans.get("action"), ans.get("times", 1))
+    if early is not None:
+        ans["action"], ans["times"] = early                # 体はもう動き始めている。途中で読んだ内容を正とする
+        ans["t_early"] = t_early
+    if ans["action"] not in ("none", "stop") and ans["times_asked"] > MAX_TIMES:
         # 頭の返事は「10回曲がります」のままなので、体がやることと口が言うことが食い違う。縛ったときは返事もコードで差し替える
         ans["say"] = f"{MAX_TIMES}回までにします。"
+    ans.setdefault("say", "")
     return ans, wall, content
 
 # ---------------------------------------------------------------- 口: Open JTalk
@@ -473,6 +508,7 @@ def main():
     ap.add_argument("--tts-rate", type=float, default=1.0, help="読み上げの速さ（1.0 が標準、1.3 で速め）")
     ap.add_argument("--tts-peak", type=float, default=0.9, help="読み上げの声のピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--chime", type=float, default=0.0, help="読み上げの前に鳴らす合図音の秒数（既定は鳴らさない。頭切れの原因はアンプが切れていたことで、合図音は不要だった）")
+    ap.add_argument("--no-early", action="store_true", help="頭の答えが全部そろってから動かす（以前の方式）")
     ap.add_argument("--max-times", type=int, default=3, help="繰り返しの上限（頭が何回と答えても、ここまで）")
     ap.add_argument("--gate", action="store_true", help="以前の方式: 自作の門番が開いたときだけ AmiVoice につなぐ（既定は、聞いている間ずっとつないでおく）")
     ap.add_argument("--open-mic", action="store_true", help="（既定になったので指定不要。互換のために残してある）")
@@ -607,13 +643,20 @@ def main():
                 say("はい、おしまいにします。"); break
             # 過去のやりとりを見せると、gemma3:4b は同じ命令に「もう曲がりました」と答えて動作を選ばないことがある
             # （指示に書き足しても 3 回に 1 回起きた）。命令はその一言だけで判断させるのを既定にする
+            # 頭は 動作 → 回数 → 返事 の順に書く。動作と回数が出た時点で体を動かし始め、返事の文は後から読み上げる
+            box = {}; th = None
+            def on_early(act, times, t):
+                nonlocal th
+                th = threading.Thread(target=lambda: box.update(t=car.act(act, times)), daemon=True)
+                th.start()
+            early_ok = not (a.act_after_say or a.no_early)
             try:
-                ans, t_llm, _ = ask_llm(a.model, history[-2 * a.history:] if a.history > 0 else [], heard)
+                ans, t_llm, _ = ask_llm(a.model, history[-2 * a.history:] if a.history > 0 else [], heard, on_early=on_early if early_ok else None)
             except Exception as e:                       # ノート PC に届かない（Wi-Fi が切れた等）。動かずに知らせて、聞き直す
                 print(f"   !! 頭に届きません: {e}")
                 say("すみません、いま考えられません。")
                 continue
-            print(f"[think] llm {t_llm:.2f}s -> say {ans['say']!r}  action {ans['action']}"
+            print(f"[think] llm {t_llm:.2f}s" + (f"（動作は {ans['t_early']:.2f}s で確定）" if "t_early" in ans else "") + f" -> say {ans['say']!r}  action {ans['action']}"
                   + (f" x{ans['times']}" + (f"（頭の答えは {ans['times_asked']} 回、上限 {MAX_TIMES}）" if ans['times_asked'] != ans['times'] else "") if ans['action'] not in ("none", "stop") and (ans['times'] > 1 or ans['times_asked'] != ans['times']) else ""))
             # 動作は返事の読み上げと同時に始める。以前は読み上げ（約 3 秒）が終わってから動かしていたので、
             # 声の終わりから動き出しまでが 6 秒近くあった（表示していた「返事の出だしまで」には入っていなかった）
@@ -622,12 +665,12 @@ def main():
                 t_act = car.act(ans["action"], ans["times"])
                 t_move = t_asr + t_llm + t_syn + CHIME + LEAD_SILENCE + t_play + 0.4
             else:
-                box = {}
-                th = threading.Thread(target=lambda: box.update(t=car.act(ans["action"], ans["times"])), daemon=True)
-                th.start()
+                if th is None:                             # 途中で読めなかった（--no-early を含む）。答えがそろってから動かす
+                    th = threading.Thread(target=lambda: box.update(t=car.act(ans["action"], ans["times"])), daemon=True)
+                    th.start()
                 t_syn, t_play = say(ans["say"])
                 th.join(); t_act = box.get("t", 0.0)
-                t_move = t_asr + t_llm
+                t_move = t_asr + ans.get("t_early", t_llm)
             print(f"[done]  tts synth {t_syn:.2f}s play {t_play:.2f}s | act {t_act:.2f}s | 声の終わりから返事の出だしまで {t_asr + t_llm + t_syn + CHIME + LEAD_SILENCE:.2f}s"
                   + (f"、動き出しまで {t_move:.2f}s" if ans["action"] != "none" else ""))
             log.writerow([time.time(), a.model, a.asr, f"{speech:.2f}", f"{t_asr:.3f}", f"{t_llm:.3f}", f"{t_syn:.3f}", f"{t_play:.3f}", f"{t_act:.3f}",
