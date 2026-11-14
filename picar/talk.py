@@ -352,6 +352,36 @@ def low_tokens(tokens, min_conf):
     return [(w, round(c, 2)) for w, c in tokens if c < min_conf]
 
 # ---------------------------------------------------------------- 頭: ノート PC の Ollama
+# ---- 記号で答えさせる方式（--code）: 動作は種類が少ないので、頭には短い記号を一つ選ばせ、返事の文はコードで決める。
+# 頭の時間は「指示文を読む」と「答えを書く」がほぼ半々だった（実測 0.8 秒 ＋ 0.9 秒）。指示文を短くし、
+# 書く量を {"action": "left", "times": 2, "say": "…"} から {"c":"L2","say":""} に減らして、両方を削る
+HEAD_CODE = False
+CODE_ACT = {"F": "forward", "B": "backward", "L": "left", "R": "right"}
+CODE_SAY = {"F": "前へ", "B": "後ろへ", "L": "左へ", "R": "右へ"}
+CODES = [f"{k}{n}" for k in "FBLR" for n in (1, 2, 3)] + ["S", "N"]
+SYSTEM_CODE = (
+    "あなたは小さな車型ロボット「ピカ」です。持ち主が声で話しかけてきます（音声認識の結果なので誤字が混ざります）。"
+    "c に記号を一つ選ぶ。F=前へ B=後ろへ L=左へ曲がる R=右へ曲がる。後ろの数字は回数で、言われなければ 1、最大 3。S=止まる。N=動かない。"
+    "動けと言われたときだけ F B L R S。あいさつ、質問、雑談は必ず N。迷ったら N。"
+    "say は N のときだけ書く（話し言葉で一言。記号や絵文字は使わない）。それ以外は空。\n"
+    '例: 「前に進んで」→ {"c":"F1","say":""}\n'
+    '例: 「左に2回曲がって」→ {"c":"L2","say":""}\n'
+    '例: 「バックして」→ {"c":"B1","say":""}\n'
+    '例: 「こんにちは」→ {"c":"N","say":"こんにちは。"}\n'
+    '例: 「止まって」→ {"c":"S","say":""}'
+)
+SCHEMA_CODE = {"type": "object", "properties": {"c": {"type": "string", "enum": CODES}, "say": {"type": "string"}}, "required": ["c", "say"]}
+
+def decode(code):
+    """記号 → (動作, 回数, コードで決めた返事 or None)。知らない記号は動かない"""
+    code = (code or "").strip().upper()
+    if code == "S":
+        return "stop", 1, "はい、止まる。"
+    if len(code) == 2 and code[0] in CODE_ACT and code[1].isdigit():
+        n = max(1, min(MAX_TIMES, int(code[1])))
+        return CODE_ACT[code[0]], n, f"はい、{CODE_SAY[code[0]]}" + (f"{n}回。" if n > 1 else "。")
+    return "none", 1, None
+
 def _clamp(action, asked):
     """頭の答え（動作・回数）をコードで縛る。戻り値: (動作, 実際の回数, 頭が答えた回数)"""
     if action not in ACTIONS:
@@ -363,11 +393,15 @@ def _clamp(action, asked):
     return action, (1 if action in ("none", "stop") else max(1, min(MAX_TIMES, asked))), asked
 
 import re
+_EARLY_CODE = re.compile(r'"c"\s*:\s*"([A-Za-z]\d?)"')
 _EARLY = re.compile(r'"action"\s*:\s*"([a-z_]+)"\s*,\s*"times"\s*:\s*(-?\d+)\s*[,}]')
 
 def early_action(partial):
     """出力の途中（JSON の書きかけ）から、動作と回数が確定していれば取り出す。まだなら None。
     回数は次の区切り（, か }）が来るまで待つ（"1" の後に "0" が続いて 10 になるかもしれないので）"""
+    if HEAD_CODE:
+        m = _EARLY_CODE.search(partial)
+        return decode(m.group(1))[:2] if m else None
     m = _EARLY.search(partial)
     return (m.group(1), int(m.group(2))) if m else None
 
@@ -375,9 +409,9 @@ def ask_llm(model, history, text, timeout=120, on_early=None, holder=None):
     """頭に聞く。戻り値: (答え, かかった秒数, 生の出力)
     on_early(action, times, 経過秒) を渡すと、答えを少しずつ受け取り、動作と回数が出た時点で一度だけ呼ぶ
     （返事の文ができあがるのを待たずに体を動かすため）。呼んだ時刻は答えの t_early に入る"""
-    msgs = [{"role": "system", "content": SYSTEM}] + history + [{"role": "user", "content": text}]
+    msgs = [{"role": "system", "content": SYSTEM_CODE if HEAD_CODE else SYSTEM}] + history + [{"role": "user", "content": text}]
     stream = on_early is not None
-    body = {"model": model, "stream": stream, "format": SCHEMA, "options": {"temperature": 0, "num_ctx": 4096}, "messages": msgs}
+    body = {"model": model, "stream": stream, "format": SCHEMA_CODE if HEAD_CODE else SCHEMA, "options": {"temperature": 0, "num_ctx": 4096}, "messages": msgs}
     req = urllib.request.Request(f"{OLLAMA}/api/chat", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
     t0 = time.time(); t_early = None; early = None; last = {}; t_first = None
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -408,6 +442,13 @@ def ask_llm(model, history, text, timeout=120, on_early=None, holder=None):
         ans = json.loads(content)
     except json.JSONDecodeError:
         ans = {"say": "すみません、うまく考えられませんでした。", "action": "none"}
+    if HEAD_CODE and "c" in ans:
+        act, n, fixed = decode(ans.get("c"))
+        ans.update({"action": act, "times": n, "code": ans.get("c")})
+        if fixed is not None:
+            ans["say"] = fixed                             # 動くときの返事はコードで決める（頭には書かせない）
+        elif not str(ans.get("say", "")).strip():
+            ans["say"] = "はい。"
     ans["action"], ans["times"], ans["times_asked"] = _clamp(ans.get("action"), ans.get("times", 1))
     if early is not None:
         ans["action"], ans["times"] = early                # 体はもう動き始めている。途中で読んだ内容を正とする
@@ -593,6 +634,7 @@ def main():
     # 頭の返事が 0.8〜2 秒遅くなった（動き出し 1.8〜2.0 秒 → 2.6〜4.0 秒）
     ap.add_argument("--ahead", action="store_true", help="先回り（AmiVoice の途中経過で先に頭に聞く）を使う。実測では逆に遅くなった")
     ap.add_argument("--post-time", type=int, default=0, help="AmiVoice が発話の終わりとみなす無音の長さ（ミリ秒。0 で既定の 550）")
+    ap.add_argument("--code", action="store_true", help="頭に短い記号（F1, L2, N など）で答えさせ、動くときの返事はコードで決める")
     ap.add_argument("--no-early", action="store_true", help="頭の答えが全部そろってから動かす（以前の方式）")
     ap.add_argument("--max-times", type=int, default=3, help="繰り返しの上限（頭が何回と答えても、ここまで）")
     ap.add_argument("--gate", action="store_true", help="以前の方式: 自作の門番が開いたときだけ AmiVoice につなぐ（既定は、聞いている間ずっとつないでおく）")
@@ -609,8 +651,9 @@ def main():
     for tool in ("arecord", "aplay", "open_jtalk"):
         if not shutil.which(tool):
             sys.exit(f"{tool} が見つかりません")
-    global MAX_TIMES, GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME, TTS_PEAK, TTS_RATE
+    global HEAD_CODE, MAX_TIMES, GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME, TTS_PEAK, TTS_RATE
     TTS_RATE = a.tts_rate
+    HEAD_CODE = a.code
     MAX_TIMES = max(1, a.max_times)
     TTS_PEAK = a.tts_peak
     GAIN_TARGET = a.gain
@@ -765,7 +808,7 @@ def main():
                 say("すみません、いま考えられません。")
                 continue
             print(f"[think] llm {t_llm:.2f}s" + (f"（先回り: 確定の {ahead:.2f}s 前から考え始めた）" if ahead is not None else (f"（動作は {ans['t_early']:.2f}s で確定）" if "t_early" in ans else ""))
-                  + (f" [先回り {spec.started} 回、うち捨てた {spec.wasted} 回]" if spec is not None and got is not None and spec.started else "") + f" -> say {ans['say']!r}  action {ans['action']}"
+                  + (f" [先回り {spec.started} 回、うち捨てた {spec.wasted} 回]" if spec is not None and got is not None and spec.started else "") + (f" [{ans['code']}]" if "code" in ans else "") + f" -> say {ans['say']!r}  action {ans['action']}"
                   + (f" x{ans['times']}" + (f"（頭の答えは {ans['times_asked']} 回、上限 {MAX_TIMES}）" if ans['times_asked'] != ans['times'] else "") if ans['action'] not in ("none", "stop") and (ans['times'] > 1 or ans['times_asked'] != ans['times']) else ""))
             print(f"        ({ans['stats']})")
             # 動作は返事の読み上げと同時に始める。以前は読み上げ（約 3 秒）が終わってから動かしていたので、
