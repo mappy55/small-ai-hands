@@ -491,15 +491,17 @@ class Memo:
         except Exception as e:
             print(f"   (控えを保存できません: {e})")
 
-def find_wake(heard, spoken, wake):
+def find_wake(heard, spoken, wake, alias=()):
     """呼びかけの言葉（「ピカ」など）を探す。戻り値: (呼ばれたか, 呼びかけを除いた文)
     表記（カタカナ・ひらがな）と読みの両方で探す。呼びかけの後ろに続く文を命令として返す（後ろが空なら前の部分）"""
     if not wake:
         return True, heard
     kata = "".join(chr(ord(c) + 0x60) if "ぁ" <= c <= "ゖ" else c for c in wake)
     hira = "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in wake)
-    for w in (kata + "ー", hira + "ー", kata, hira):
-        i = heard.find(w)
+    # alias: 同じ言葉の別の書かれ方（AmiVoice は「ピカ」を「PIKA」と書いて返すことが多かった）。大文字小文字は区別しない
+    low = heard.lower()
+    for w in (kata + "ー", hira + "ー", kata, hira) + tuple(x.lower() for x in alias if x):
+        i = low.find(w)
         if i >= 0:
             rest = re.sub(r"^(ちゃん|くん)?[、。 　,]*", "", heard[i + len(w):]) or heard[:i].rstrip("、。 　,")
             return True, rest
@@ -685,6 +687,7 @@ def main():
     ap.add_argument("--no-memo", dest="memo", action="store_false", help="頭の答えを控えない（毎回頭に聞く）")
     ap.add_argument("--memo-file", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "head_memo.json"))
     ap.add_argument("--wake", default="", help="呼びかけの言葉（例: ピカ）。指定すると、この言葉が入った文だけを相手にする")
+    ap.add_argument("--wake-alias", default="PIKA", help="呼びかけの別の書かれ方（カンマ区切り）。認識結果にこの形で出ても呼びかけとして扱う")
     ap.add_argument("--wake-window", type=float, default=0.0, help="返事をしてからこの秒数は、呼びかけなしでも受け付ける（0 で毎回呼びかけが必要）")
     ap.add_argument("--words", default="", help='AmiVoice の単語登録（--asr ws のみ）。「表記 読み|表記 読み」の形。例: "ピカ ぴか"')
     ap.add_argument("--no-early", action="store_true", help="頭の答えが全部そろってから動かす（以前の方式）")
@@ -824,7 +827,7 @@ def main():
             # 呼びかけ（--wake）: つなぎっぱなしだと、ロボットに向けていない会話も全部聞こえる。
             # 呼びかけの言葉が入った文だけを相手にし、それ以外は頭にも送らず、返事もしない
             if a.wake:
-                called, rest = find_wake(heard, spoken, a.wake)
+                called, rest = find_wake(heard, spoken, a.wake, [x.strip() for x in a.wake_alias.split(",")])
                 if not called and time.time() < wake_until:
                     called, rest = True, heard             # 直前に呼ばれた続き（--wake-window 秒以内）
                 if not called:
