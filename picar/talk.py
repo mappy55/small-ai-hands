@@ -309,10 +309,21 @@ def amivoice(wav_bytes, engine="-a-general"):
 
 # ---------------------------------------------------------------- 判定: 信頼度の低い単語を落とす
 def clean_tokens(tokens, min_conf):
-    """信頼度が min_conf 未満の単語を落とす。戻り値: (残した文, 落とした単語の一覧)"""
-    kept = [w for w, c in tokens if c >= min_conf]
-    dropped = [(w, c) for w, c in tokens if c < min_conf]
-    return "".join(kept), dropped
+    """信頼度が min_conf 未満の単語を、文の末尾に続いているぶんだけ落とす。戻り値: (残した文, 落とした単語の一覧)
+
+    落とすのは末尾だけ。実測では、途中で切れた発話のかけらは末尾に付き（「前に進んで前に進んで」＋「ない」0.49）、
+    落とすと意味が正しくなる。一方、文の途中の低い単語は合っていることがあり（「左に曲がって」の「曲がっ」0.51）、
+    落とすと「左にて」になって命令が壊れた。途中の単語は残し、表示だけする。"""
+    n = len(tokens)
+    while n > 0 and tokens[n - 1][1] < min_conf:
+        n -= 1
+    kept = "".join(w for w, _ in tokens[:n])
+    dropped = [(w, c) for w, c in tokens[n:]]
+    return kept, dropped
+
+def low_tokens(tokens, min_conf):
+    """残したが信頼度の低い単語（表示とログ用）"""
+    return [(w, round(c, 2)) for w, c in tokens if c < min_conf]
 
 # ---------------------------------------------------------------- 頭: ノート PC の Ollama
 def ask_llm(model, history, text, timeout=120):
@@ -546,8 +557,10 @@ def main():
                     break
                 continue
             heard, dropped = clean_tokens(tokens, a.min_conf)
+            unsure = [x for x in low_tokens(tokens, a.min_conf) if x[0] in heard and (x[0], x[1]) not in [(w, round(c, 2)) for w, c in dropped]]
             print(f"[heard] {text!r}  heard in {t_asr:.2f}s ({lvl})"
-                  + (f"  dropped {[(w, round(c, 2)) for w, c in dropped]} -> {heard!r}" if dropped else ""))
+                  + (f"  dropped tail {[(w, round(c, 2)) for w, c in dropped]} -> {heard!r}" if dropped else "")
+                  + (f"  low-confidence kept {unsure}" if unsure else ""))
             if not heard.strip():
                 if tokens:                                   # 何か聞こえたが全部あやしい → 動かずに聞き返す
                     say("すみません、もう一度お願いします。")
@@ -559,7 +572,12 @@ def main():
                 say("はい、おしまいにします。"); break
             # 過去のやりとりを見せると、gemma3:4b は同じ命令に「もう曲がりました」と答えて動作を選ばないことがある
             # （指示に書き足しても 3 回に 1 回起きた）。命令はその一言だけで判断させるのを既定にする
-            ans, t_llm, _ = ask_llm(a.model, history[-2 * a.history:] if a.history > 0 else [], heard)
+            try:
+                ans, t_llm, _ = ask_llm(a.model, history[-2 * a.history:] if a.history > 0 else [], heard)
+            except Exception as e:                       # ノート PC に届かない（Wi-Fi が切れた等）。動かずに知らせて、聞き直す
+                print(f"   !! 頭に届きません: {e}")
+                say("すみません、いま考えられません。")
+                continue
             print(f"[think] llm {t_llm:.2f}s -> say {ans['say']!r}  action {ans['action']}")
             t_syn, t_play = say(ans["say"])
             t_act = car.act(ans["action"])
