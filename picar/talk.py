@@ -464,6 +464,30 @@ def ask_llm(model, history, text, timeout=120, on_early=None, holder=None):
                     + (f", first chunk {t_first:.2f}s" if t_first is not None else ""))
     return ans, wall, content
 
+class Memo:
+    """頭の答えの控え。同じ文を前に聞いたことがあれば、頭に聞かずにその答えを使う。
+    判断するのは頭のまま（初めての文は頭に聞く）。温度 0・履歴なしなら同じ文には同じ答えが返るので、結果は変わらず時間だけ減る。
+    指示文かモデルを変えたら、控えは別物として扱う（鍵に含める）。"""
+    def __init__(self, path, model):
+        import hashlib
+        self.path = path
+        self.ns = model + ":" + hashlib.sha1(((SYSTEM_CODE if HEAD_CODE else SYSTEM) + str(MAX_TIMES)).encode()).hexdigest()[:10]
+        try:
+            self.all = json.load(open(path, encoding="utf-8"))
+        except Exception:
+            self.all = {}
+        self.d = self.all.setdefault(self.ns, {})
+    def get(self, text):
+        return self.d.get(norm_text(text))
+    def put(self, text, ans):
+        self.d[norm_text(text)] = {k: ans[k] for k in ("action", "times", "times_asked", "say", "code") if k in ans}
+        try:
+            tmp = self.path + ".tmp"
+            json.dump(self.all, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+            os.replace(tmp, self.path)
+        except Exception as e:
+            print(f"   (控えを保存できません: {e})")
+
 def norm_text(t):
     """途中経過と確定の文を比べるための正規化: 句読点・空白・途中経過の末尾に付く「.」を取る"""
     return "".join(ch for ch in (t or "") if ch not in " 　、。.．…,，!！?？")
@@ -638,6 +662,8 @@ def main():
     ap.add_argument("--no-code", dest="code", action="store_false", help="以前の方式: 頭に動作・回数・返事の文をすべて書かせる")
     ap.add_argument("--code", dest="code", action="store_true", help="（既定になったので指定不要）頭に短い記号（F1, L2, N など）で答えさせ、動くときの返事はコードで決める")
     ap.set_defaults(code=True)
+    ap.add_argument("--no-memo", dest="memo", action="store_false", help="頭の答えを控えない（毎回頭に聞く）")
+    ap.add_argument("--memo-file", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs", "head_memo.json"))
     ap.add_argument("--no-early", action="store_true", help="頭の答えが全部そろってから動かす（以前の方式）")
     ap.add_argument("--max-times", type=int, default=3, help="繰り返しの上限（頭が何回と答えても、ここまで）")
     ap.add_argument("--gate", action="store_true", help="以前の方式: 自作の門番が開いたときだけ AmiVoice につなぐ（既定は、聞いている間ずっとつないでおく）")
@@ -669,6 +695,7 @@ def main():
     if a.keep:
         os.makedirs(a.keep, exist_ok=True)
     n_utt = 0; spec = None
+    memo = Memo(a.memo_file, a.model) if (a.memo and a.history == 0) else None
     if a.meter:
         if a.say_first:
             print("== 音量計: 最初に読み上げを 1 回鳴らします。そのあと 5 秒黙って、それから話してください")
@@ -793,8 +820,14 @@ def main():
             early_ok = not (a.act_after_say or a.no_early)
             job = spec.take(heard) if (spec is not None and got is not None) else None
             ahead = None
+            known = memo.get(heard) if memo is not None else None
             try:
-                if job is not None:
+                if known is not None:
+                    # 前に同じ文を頭に聞いたことがある。その答えを使う（頭には聞かない）
+                    ans = dict(known); ans["stats"] = "控えを使用。頭には聞いていない"; ans["memo"] = True; t_llm = 0.0
+                    if early_ok:
+                        on_early(ans["action"], ans["times"], 0)
+                elif job is not None:
                     # 先回りが当たった: 動作が決まりしだい動かし、答えがそろうのを待つ
                     job["ev"].wait(120)
                     if job["early"] is not None:
@@ -805,12 +838,14 @@ def main():
                     ans = job["ans"]; ahead = t_ref - job["t0"]            # 確定の何秒前に聞き始めていたか
                     t_llm = max(0.0, job["t1"] - t_ref)                    # 確定してから答えがそろうまで
                 else:
-                    ans, t_llm, _ = ask_llm(a.model, history[-2 * a.history:] if a.history > 0 else [], heard, on_early=on_early if early_ok else None)
+                    ans, t_llm, raw = ask_llm(a.model, history[-2 * a.history:] if a.history > 0 else [], heard, on_early=on_early if early_ok else None)
+                    if memo is not None and ("code" in ans or '"action"' in raw):       # 頭がまともに答えたときだけ控える
+                        memo.put(heard, ans)
             except Exception as e:                       # ノート PC に届かない（Wi-Fi が切れた等）。動かずに知らせて、聞き直す
                 print(f"   !! 頭に届きません: {e}")
                 say("すみません、いま考えられません。")
                 continue
-            print(f"[think] llm {t_llm:.2f}s" + (f"（先回り: 確定の {ahead:.2f}s 前から考え始めた）" if ahead is not None else (f"（動作は {ans['t_early']:.2f}s で確定）" if "t_early" in ans else ""))
+            print(f"[think] " + ("控え（頭に聞かず）" if ans.get("memo") else f"llm {t_llm:.2f}s") + (f"（先回り: 確定の {ahead:.2f}s 前から考え始めた）" if ahead is not None else (f"（動作は {ans['t_early']:.2f}s で確定）" if "t_early" in ans else ""))
                   + (f" [先回り {spec.started} 回、うち捨てた {spec.wasted} 回]" if spec is not None and got is not None and spec.started else "") + (f" [{ans['code']}]" if "code" in ans else "") + f" -> say {ans['say']!r}  action {ans['action']}"
                   + (f" x{ans['times']}" + (f"（頭の答えは {ans['times_asked']} 回、上限 {MAX_TIMES}）" if ans['times_asked'] != ans['times'] else "") if ans['action'] not in ("none", "stop") and (ans['times'] > 1 or ans['times_asked'] != ans['times']) else ""))
             print(f"        ({ans['stats']})")
