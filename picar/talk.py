@@ -457,9 +457,11 @@ def main():
     ap.add_argument("--tts-rate", type=float, default=1.0, help="読み上げの速さ（1.0 が標準、1.3 で速め）")
     ap.add_argument("--tts-peak", type=float, default=0.9, help="読み上げの声のピークをこの割合まで増幅する（0 で増幅しない）")
     ap.add_argument("--chime", type=float, default=0.0, help="読み上げの前に鳴らす合図音の秒数（既定は鳴らさない。頭切れの原因はアンプが切れていたことで、合図音は不要だった）")
-    ap.add_argument("--open-mic", action="store_true", help="門番を使わず、聞いている間ずっと AmiVoice につないでおく（--asr ws のみ）")
+    ap.add_argument("--gate", action="store_true", help="以前の方式: 自作の門番が開いたときだけ AmiVoice につなぐ（既定は、聞いている間ずっとつないでおく）")
+    ap.add_argument("--open-mic", action="store_true", help="（既定になったので指定不要。互換のために残してある）")
+    ap.add_argument("--no-lead", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--act-after-say", action="store_true", help="以前の順番（読み上げが終わってから動く）に戻す")
-    ap.add_argument("--lead", type=float, default=0.25, help="合図音と文の間の秒数")
+    ap.add_argument("--lead", type=float, default=0.0, help="合図音と文の間の秒数")
     ap.add_argument("--lead-level", type=int, default=100, help="その間をつなぐ雑音の大きさ（0 で完全な無音）")
     ap.add_argument("--history", type=int, default=0, help="モデルに見せる過去のやりとりの数（往復）。0 だと毎回その一言だけで判断する")
     ap.add_argument("--keep", default="logs/talk_wavs", help="送った音声を残すディレクトリ（'' で残さない）。棄却された声を後で調べるため")
@@ -538,7 +540,7 @@ def main():
                 detail = f"endpoint wait {LAST.get('endwait', 0.0):.1f}s + http {t_http:.2f}s, recorded {speech:.1f}s"
             else:
                 try:
-                    got = listen_stream(dev, thr=a.thr or None, gain=a.stream_gain, gate=not a.open_mic)
+                    got = listen_stream(dev, thr=a.thr or None, gain=a.stream_gain, gate=a.gate)
                 except Exception as e:
                     print(f"   !! {e}"); time.sleep(1); continue
                 if got is None:
