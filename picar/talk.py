@@ -25,7 +25,8 @@ RATE = 16000
 CHUNK = RATE // 10                       # 0.1 秒
 ACTIONS = ["forward", "backward", "left", "right", "stop", "none"]
 GAIN_TARGET = 0.7                        # 送る前にピークをここまで増幅する（0 で増幅しない）
-CHIME = 0.15                             # 読み上げの前の合図音（ピッ）の長さ（秒）。0 で鳴らさない
+TTS_PEAK = 0.9                           # 読み上げの声のピークをここまで増幅する（0 で増幅しない）
+CHIME = 0.0                              # 読み上げの前の合図音（ピッ）の長さ（秒）。0 で鳴らさない
 CHIME_LEVEL = 5000                       # 合図音の大きさ（16 ビットで ±5000 ＝ 約 -16dB）
 LEAD_SILENCE = 0.25                      # 合図音と文の間（秒）
 LEAD_LEVEL = 100                         # その間をつなぐ雑音の大きさ（±100 ＝ 約 -50dB。0 だと完全な無音）
@@ -308,10 +309,21 @@ def amivoice(wav_bytes, engine="-a-general"):
 
 # ---------------------------------------------------------------- 判定: 信頼度の低い単語を落とす
 def clean_tokens(tokens, min_conf):
-    """信頼度が min_conf 未満の単語を落とす。戻り値: (残した文, 落とした単語の一覧)"""
-    kept = [w for w, c in tokens if c >= min_conf]
-    dropped = [(w, c) for w, c in tokens if c < min_conf]
-    return "".join(kept), dropped
+    """信頼度が min_conf 未満の単語を、文の末尾に続いているぶんだけ落とす。戻り値: (残した文, 落とした単語の一覧)
+
+    落とすのは末尾だけ。実測では、途中で切れた発話のかけらは末尾に付き（「前に進んで前に進んで」＋「ない」0.49）、
+    落とすと意味が正しくなる。一方、文の途中の低い単語は合っていることがあり（「左に曲がって」の「曲がっ」0.51）、
+    落とすと「左にて」になって命令が壊れた。途中の単語は残し、表示だけする。"""
+    n = len(tokens)
+    while n > 0 and tokens[n - 1][1] < min_conf:
+        n -= 1
+    kept = "".join(w for w, _ in tokens[:n])
+    dropped = [(w, c) for w, c in tokens[n:]]
+    return kept, dropped
+
+def low_tokens(tokens, min_conf):
+    """残したが信頼度の低い単語（表示とログ用）"""
+    return [(w, round(c, 2)) for w, c in tokens if c < min_conf]
 
 # ---------------------------------------------------------------- 頭: ノート PC の Ollama
 def ask_llm(model, history, text, timeout=120):
@@ -335,6 +347,17 @@ def ask_llm(model, history, text, timeout=120):
 DIC = "/var/lib/mecab/dic/open-jtalk/naist-jdic"
 VOICE = "/usr/share/hts-voice/nitech-jp-atr503-m001/nitech_jp_atr503_m001.htsvoice"
 
+def enable_speaker():
+    """Robot HAT のアンプを入れる。アンプの入り切りは GPIO 20 で、I2S の DAC を有効にするとこのピンが
+    I2S の入力（a2）に取られて lo のまま＝アンプが切れた状態になる。出力・high にすると鳴る。"""
+    try:
+        subprocess.run(["pinctrl", "set", "20", "op", "dh"], check=True, timeout=5,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception as e:
+        print(f"   (スピーカーのアンプを入れられませんでした: {e} — 音が出なければ `pinctrl set 20 op dh` を手で実行)")
+        return False
+
 def say(text, wav=None):
     """読み上げる。戻り値: (合成の秒数, 再生の秒数)"""
     if not text.strip():
@@ -344,15 +367,21 @@ def say(text, wav=None):
     t0 = time.time()
     subprocess.run(["open_jtalk", "-x", DIC, "-m", VOICE, "-ow", wav], input=text.encode(), check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-    # 文の頭が切れる対策。先頭に完全な無音（0）を足しても、聞こえないほど小さな雑音（±12）を足しても、最初の一音が欠けた。
-    # アンプは「ある程度の大きさの音」が来てから立ち上がるらしいので、文の前に短い合図音（ピッ）を鳴らして起こしておく。
-    # 合図音の頭が欠けても困らないし、「これから話す」の合図にもなる。そのあと小さな雑音でつないで、文に入る。
+    # 文の頭が切れる件は、アンプが切れていた（GPIO 20 が lo）のと音量が 40% だったのが原因で、enable_speaker() と
+    # amixer で直った。無音・小さな雑音・合図音を先頭に足す対策はどれも的外れだった。助走（--lead）と合図音（--chime）は
+    # 残してあるが、合図音は既定で鳴らさない。
     if LEAD_SILENCE > 0 or CHIME > 0:
         import random, math
         with wave.open(wav, "rb") as w:
             params = w.getparams(); frames = w.readframes(w.getnframes())
         if params.sampwidth == 2:
             sr, ch = params.framerate, params.nchannels
+            if TTS_PEAK > 0:                                  # Open JTalk の声は小さめなので、ピークをそろえて大きくする
+                body = array.array("h"); body.frombytes(frames)
+                pk = max(1, max(abs(x) for x in body)) if body else 1
+                g = TTS_PEAK * 32767 / pk
+                if g > 1.05:
+                    frames = array.array("h", (max(-32768, min(32767, int(x * g))) for x in body)).tobytes()
             lead = array.array("h")
             n_chime = int(sr * CHIME)
             for k in range(n_chime):
@@ -414,7 +443,8 @@ def main():
     ap.add_argument("--meter", action="store_true", help="音量計だけ動かす（15 秒。読み上げ → 黙る → 話す、で床と声の差を見る）")
     ap.add_argument("--say-first", action="store_true", help="--meter の前に読み上げを 1 回鳴らす（スピーカーを使ったあとの床を見る）")
     ap.add_argument("--gain", type=float, default=0.7, help="送る前にピークをこの割合まで増幅する（0 で増幅しない）")
-    ap.add_argument("--chime", type=float, default=0.15, help="読み上げの前に鳴らす合図音の秒数（アンプを起こして文の頭が切れるのを防ぐ。0 で鳴らさない）")
+    ap.add_argument("--tts-peak", type=float, default=0.9, help="読み上げの声のピークをこの割合まで増幅する（0 で増幅しない）")
+    ap.add_argument("--chime", type=float, default=0.0, help="読み上げの前に鳴らす合図音の秒数（既定は鳴らさない。頭切れの原因はアンプが切れていたことで、合図音は不要だった）")
     ap.add_argument("--lead", type=float, default=0.25, help="合図音と文の間の秒数")
     ap.add_argument("--lead-level", type=int, default=100, help="その間をつなぐ雑音の大きさ（0 で完全な無音）")
     ap.add_argument("--history", type=int, default=0, help="モデルに見せる過去のやりとりの数（往復）。0 だと毎回その一言だけで判断する")
@@ -425,13 +455,15 @@ def main():
     for tool in ("arecord", "aplay", "open_jtalk"):
         if not shutil.which(tool):
             sys.exit(f"{tool} が見つかりません")
-    global GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME
+    global GAIN_TARGET, LEAD_SILENCE, LEAD_LEVEL, CHIME, TTS_PEAK
+    TTS_PEAK = a.tts_peak
     GAIN_TARGET = a.gain
     LEAD_SILENCE = a.lead
     LEAD_LEVEL = a.lead_level
     CHIME = a.chime
     dev = mic_device()
     car = Car(a.move, a.speed, a.seconds)
+    enable_speaker()                                          # Picarx の初期化のあとに入れる（初期化でピンが変わっても上書きする）
     if a.keep:
         os.makedirs(a.keep, exist_ok=True)
     n_utt = 0
@@ -525,8 +557,10 @@ def main():
                     break
                 continue
             heard, dropped = clean_tokens(tokens, a.min_conf)
+            unsure = [x for x in low_tokens(tokens, a.min_conf) if x[0] in heard and (x[0], x[1]) not in [(w, round(c, 2)) for w, c in dropped]]
             print(f"[heard] {text!r}  heard in {t_asr:.2f}s ({lvl})"
-                  + (f"  dropped {[(w, round(c, 2)) for w, c in dropped]} -> {heard!r}" if dropped else ""))
+                  + (f"  dropped tail {[(w, round(c, 2)) for w, c in dropped]} -> {heard!r}" if dropped else "")
+                  + (f"  low-confidence kept {unsure}" if unsure else ""))
             if not heard.strip():
                 if tokens:                                   # 何か聞こえたが全部あやしい → 動かずに聞き返す
                     say("すみません、もう一度お願いします。")
@@ -538,7 +572,12 @@ def main():
                 say("はい、おしまいにします。"); break
             # 過去のやりとりを見せると、gemma3:4b は同じ命令に「もう曲がりました」と答えて動作を選ばないことがある
             # （指示に書き足しても 3 回に 1 回起きた）。命令はその一言だけで判断させるのを既定にする
-            ans, t_llm, _ = ask_llm(a.model, history[-2 * a.history:] if a.history > 0 else [], heard)
+            try:
+                ans, t_llm, _ = ask_llm(a.model, history[-2 * a.history:] if a.history > 0 else [], heard)
+            except Exception as e:                       # ノート PC に届かない（Wi-Fi が切れた等）。動かずに知らせて、聞き直す
+                print(f"   !! 頭に届きません: {e}")
+                say("すみません、いま考えられません。")
+                continue
             print(f"[think] llm {t_llm:.2f}s -> say {ans['say']!r}  action {ans['action']}")
             t_syn, t_play = say(ans["say"])
             t_act = car.act(ans["action"])
